@@ -39,10 +39,11 @@ label_generation:
     # Unverified/Custom Patterns -> ignore unless specifically tested
     rain_drop: 'ignore'
     rain_drop_doji: 'ignore'
+    breakout: 'long'      # New Breakout pattern added
 
     # New Multi-Candle Patterns
     double_top: 'ignore'      # Typically bearish
-    double_bottom: 'long'    # Typically bullish
+    double_bottom: 'ignore'    # Typically bullish
     triple_top: 'ignore'      # Typically bearish
     triple_bottom: 'ignore'    # Typically bullish
 
@@ -73,7 +74,7 @@ export_pnl:
 
   # Maximum number of concurrent positions allowed per symbol during export.
   # Set to null or a large integer to disable the limit.
-  max_concurrent_positions: 3
+  max_concurrent_positions: 500
 
   # SQL WHERE clause snippets for filtering trades before export - REMOVED ML-specific filters
   # Filters based on pattern labels will be handled implicitly by 'pattern_directions' in calculate_pnl.py

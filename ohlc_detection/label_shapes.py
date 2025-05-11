@@ -80,6 +80,7 @@ PATTERNS_TO_DETECT: Dict[str, callable] = {
     'double_bottom': cs.double_bottom,
     'triple_top': cs.is_triple_top,
     'triple_bottom': cs.is_triple_bottom,
+    'breakout': cs.breakout,
 }
 print(f"Configured to detect {len(PATTERNS_TO_DETECT)} patterns.")
 
@@ -250,7 +251,7 @@ def generate_labels_from_db(db_client: ClickHouseClient, config: Dict, pattern_d
     )
 
     # Fill any rows that didn't get a match with 'no_pattern'
-    ohlc_with_labels['pattern_label'].fillna('no_pattern', inplace=True)
+    ohlc_with_labels['pattern_label'] = ohlc_with_labels['pattern_label'].fillna('no_pattern')
 
     # Set the timestamp back as the index
     ohlc_with_labels.set_index('timestamp', inplace=True)
@@ -273,14 +274,13 @@ def detect_patterns_on_df(ohlc_df: pd.DataFrame, patterns_to_run: Dict[str, call
         indexed by the original timestamp.
     """
     if ohlc_df.empty:
-        print("Input OHLC DataFrame is empty. Cannot detect patterns.")
+        # print("Input OHLC DataFrame is empty. Cannot detect patterns.") # Commented out
         return pd.DataFrame()
 
     all_results = []
     total_tickers = ohlc_df['ticker'].nunique()
-    print(f"Detecting patterns for {total_tickers} unique tickers...")
+    # print(f"Detecting patterns for {total_tickers} unique tickers...") # Commented out
 
-    # Ensure required columns exist and are lowercase
     required_cols = ['ticker', 'open', 'high', 'low', 'close']
     ohlc_df_processed = ohlc_df.copy()
     ohlc_df_processed.columns = map(str.lower, ohlc_df_processed.columns)
@@ -288,211 +288,141 @@ def detect_patterns_on_df(ohlc_df: pd.DataFrame, patterns_to_run: Dict[str, call
         missing = [col for col in required_cols if col not in ohlc_df_processed.columns]
         raise ValueError(f"Missing required columns in DataFrame: {missing}")
 
-    # Group by ticker and process each group
-    # Ensure the index is the timestamp before grouping
     if not isinstance(ohlc_df_processed.index, pd.DatetimeIndex):
-         print("Warning: DataFrame index is not a DatetimeIndex. Attempting to set 'timestamp' column as index.")
-         if 'timestamp' in ohlc_df_processed.columns:
-              ohlc_df_processed['timestamp'] = pd.to_datetime(ohlc_df_processed['timestamp'], utc=True)
-              ohlc_df_processed.set_index('timestamp', inplace=True)
-         else:
-              raise ValueError("Cannot set timestamp index: 'timestamp' column not found.")
+        # print("Warning: DataFrame index is not a DatetimeIndex. Attempting to set 'timestamp' column as index.") # Commented out
+        if 'timestamp' in ohlc_df_processed.columns:
+            ohlc_df_processed['timestamp'] = pd.to_datetime(ohlc_df_processed['timestamp'], utc=True)
+            ohlc_df_processed.set_index('timestamp', inplace=True)
+        else:
+            raise ValueError("Cannot set timestamp index: 'timestamp' column not found.")
 
     grouped = ohlc_df_processed.groupby('ticker')
+    # print("Debug: About to start iterating through grouped tickers...") # Commented out
 
-    print("Debug: About to start iterating through grouped tickers...") # New debug print
-
-    for ticker, group_df in tqdm(grouped, total=total_tickers, desc="Processing Tickers"):
-        print(f"\nStarting processing for ticker: {ticker}, Number of rows: {len(group_df)}")
-
-        # Make sure the group has enough data
-        if len(group_df) < 3: # Some multi-candle patterns might need more, but this is a basic check.
+    for ticker, group_df in tqdm(grouped, total=total_tickers, desc="Processing Tickers"): 
+        # print(f"\nStarting processing for ticker: {ticker}, Number of rows: {len(group_df)}") # Commented out
+        if len(group_df) < 3: 
             continue
 
-        # Create a results DataFrame for this ticker, keep original index (timestamp)
-        ticker_results = group_df[[]].copy() # Start with an empty df preserving the index
-        ticker_results['ticker'] = ticker # Add ticker column
+        ticker_results = group_df[[]].copy() 
+        ticker_results['ticker'] = ticker 
 
-        # Prepare ohlc_list_for_mcp once per ticker if any mcp patterns exist
         ohlc_list_for_mcp_prepared = False
-        local_ohlc_list_for_mcp = [] # Use a local variable for the list
+        local_ohlc_list_for_mcp = [] 
 
-        # Apply each pattern function
         for pattern_name, pattern_func in patterns_to_run.items():
-            print(f"  Applying pattern '{pattern_name}' for ticker '{ticker}'...")
+            # print(f"  Applying pattern '{pattern_name}' for ticker '{ticker}'...") # Commented out
             try:
-                # Check if it's a multi-candle pattern function (now they are imported directly)
-                # We can check if the function's __module__ starts with ohlc_detection.candlestick.patterns and is not common_utils
-                # This check should still work as the functions are imported into cs but retain their original module
-                
-                # --- Modified MCP check --- 
-                # For now, let's assume all patterns from PATTERNS_TO_DETECT that are NOT in the old cs module structure
-                # are the new ones. This is brittle. A better way would be to inspect pattern_func signature or a flag.
-                # OR, since we are refactoring them to be like CandlestickFinder, this special path will be removed.
-                
-                # For DoubleBottom, it will now follow the standard path.
-                # The other 3 (double_top, triple_top, triple_bottom) will still use MCP path until refactored.
-                is_refactored_mcp = pattern_name in ['double_bottom'] # Add other refactored patterns here later
+                is_old_style_mcp = pattern_name in ['double_top', 'triple_top', 'triple_bottom']
 
-                # The old MCP check, keep for not-yet-refactored patterns
-                is_old_mcp_pattern = hasattr(pattern_func, '__module__') and \
-                                   pattern_func.__module__.startswith('ohlc_detection.candlestick.patterns.') and \
-                                   not pattern_func.__module__.endswith('.common_utils')
-
-                if is_old_mcp_pattern and not is_refactored_mcp:
+                if is_old_style_mcp:
                     if not ohlc_list_for_mcp_prepared:
-                        print(f"  Preparing list of OHLC dicts for {ticker} (first time for multi-candle pattern)...")
-                        print(f"    DEBUG MCP DATA PREP for {ticker}: Iterating group_df with {len(group_df)} rows.")
-                        log_mcp_row_count = 0
+                        local_ohlc_list_for_mcp = []
                         for ts_idx, row_data in group_df.iterrows():
-                            if log_mcp_row_count < 5 or log_mcp_row_count % 1000 == 0: # Log first 5 and then every 1000th
-                                print(f"      Row {log_mcp_row_count}: ts={ts_idx}, open({type(row_data['open'])})={row_data['open']}, high({type(row_data['high'])})={row_data['high']}, low({type(row_data['low'])})={row_data['low']}, close({type(row_data['close'])})={row_data['close']}")
-                            log_mcp_row_count += 1
-                            local_ohlc_list_for_mcp.append({
-                                'open': row_data['open'],
-                                'high': row_data['high'],
-                                'low': row_data['low'],
-                                'close': row_data['close'],
-                                'timestamp': ts_idx
-                            })
+                            ohlc_item = {'timestamp': ts_idx}
+                            for col in ['open', 'high', 'low', 'close']:
+                                if col in row_data:
+                                    ohlc_item[col] = row_data[col]
+                                else: 
+                                    ohlc_item[col] = np.nan 
+                            local_ohlc_list_for_mcp.append(ohlc_item)
                         ohlc_list_for_mcp_prepared = True
-                        print(f"  Finished preparing list of OHLC dicts for {ticker} ({len(local_ohlc_list_for_mcp)} items).")
-                        if local_ohlc_list_for_mcp:
-                            print(f"    DEBUG MCP DATA PREP for {ticker}: First item in local_ohlc_list_for_mcp: {local_ohlc_list_for_mcp[0]}")
-                            print(f"    DEBUG MCP DATA PREP for {ticker}: Last item in local_ohlc_list_for_mcp: {local_ohlc_list_for_mcp[-1]}")
-                    
-                    if not local_ohlc_list_for_mcp: # Check if the list is empty after preparation attempt
+
+                    if not local_ohlc_list_for_mcp:
                         ticker_results[pattern_name] = pd.Series(False, index=group_df.index)
-                        print(f"  Skipping {pattern_name} for {ticker} due to empty OHLC list.")
                         continue
 
-                    # Call the mcp pattern function. It uses its own DEFAULT_CONFIG if config is None.
-                    found, details = pattern_func(local_ohlc_list_for_mcp, config=None) 
+                    found, details = pattern_func(local_ohlc_list_for_mcp, config=None) # Corrected variable name
+                    pattern_series = pd.Series(False, index=group_df.index) 
+                    if found and details and 'breakout' in details and 'timestamp' in details['breakout'] and details['breakout']['timestamp'] is not None:
+                        breakout_timestamp = pd.Timestamp(details['breakout']['timestamp'])
+                        if breakout_timestamp.tzinfo is None and group_df.index.tz is not None: 
+                           breakout_timestamp = breakout_timestamp.tz_localize(group_df.index.tz)
+                        elif breakout_timestamp.tzinfo is not None and group_df.index.tz is not None and breakout_timestamp.tzinfo != group_df.index.tzinfo:
+                           breakout_timestamp = breakout_timestamp.tz_convert(group_df.index.tz)
 
-                    pattern_series = pd.Series(False, index=group_df.index)
-                    if found and details and 'breakout' in details and 'timestamp' in details['breakout']:
-                        breakout_timestamp = details['breakout']['timestamp']
                         if breakout_timestamp in pattern_series.index:
                             pattern_series.loc[breakout_timestamp] = True
-                            print(f"  SUCCESS: Pattern '{pattern_name}' FOUND for ticker '{ticker}' at {breakout_timestamp}.")
-                        else:
-                            print(f"\n  Warning: Breakout timestamp {breakout_timestamp} for {pattern_name} on ticker '{ticker}' not found in group_df index. Pattern considered not found for this specific breakout.")
-                    elif not found:
-                        print(f"  INFO: Pattern '{pattern_name}' not found for ticker '{ticker}' after checking.") # Explicit not found log
-                    else: # Found might be true, but details are missing/invalid for breakout
-                        print(f"  INFO: Pattern '{pattern_name}' for ticker '{ticker}' returned found=True but details were insufficient for breakout processing.")
-
                     ticker_results[pattern_name] = pattern_series
-
-                else: # Existing single-candle pattern logic (cs patterns) AND NEW REFFACTORED MCPs
-                    # <<< Create df with renamed columns (Capitalized) >>>
+                else: 
                     df_for_pattern = group_df.rename(columns={
-                        'open': 'Open',
-                        'high': 'High',
-                        'low': 'Low',
-                        'close': 'Close'
+                        'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close'
                     })
+                    df_for_pattern.index = df_for_pattern.index.tz_localize(None) 
 
-                    # --- DEBUGGING ADDED ---
-                    if pattern_name == 'double_bottom': # Only print for the pattern we are debugging
-                        print(f"    DEBUG: For {ticker}, pattern {pattern_name}:")
-                        print(f"    DEBUG: group_df.columns: {list(group_df.columns)}")
-                        print(f"    DEBUG: group_df index type: {type(group_df.index)}")
-                        print(f"    DEBUG: df_for_pattern.columns after rename: {list(df_for_pattern.columns)}")
-                        print(f"    DEBUG: df_for_pattern index type after rename: {type(df_for_pattern.index)}")
-                    # --- END DEBUGGING ---
+                    pattern_output = pattern_func(df_for_pattern)
+                                                                
+                    class_name_from_pattern = ''.join(word.capitalize() for word in pattern_name.split('_'))
+                    bool_series_from_pattern = None
 
-                    # <<< Convert index to tz-naive >>>
-                    df_for_pattern.index = df_for_pattern.index.tz_localize(None)
-
-                    # --- DEBUGGING ADDED ---
-                    if pattern_name == 'double_bottom':
-                        print(f"    DEBUG: df_for_pattern index type after tz_localize(None): {type(df_for_pattern.index)}")
-                    # --- END DEBUGGING ---
-
-                    # <<< Call pattern function with prepared DataFrame >>>
-                    pattern_result = pattern_func(df_for_pattern)
-
-                    # --- DEBUGGING ADDED ---
-                    if pattern_name == 'double_bottom':
-                        print(f"    DEBUG: pattern_result type: {type(pattern_result)}")
-                        if isinstance(pattern_result, pd.DataFrame):
-                            print(f"    DEBUG: pattern_result columns: {list(pattern_result.columns)}")
-                            print(f"    DEBUG: pattern_result index type: {type(pattern_result.index)}")
-                        elif isinstance(pattern_result, pd.Series):
-                            print(f"    DEBUG: pattern_result name: {pattern_result.name}")
-                            print(f"    DEBUG: pattern_result index type: {type(pattern_result.index)}")
-                    # --- END DEBUGGING ---
-
-                    # Select only the boolean column (assuming it's named after the CamelCase class name)
-                    class_name = ''.join(word.capitalize() for word in pattern_name.split('_'))
-                    # --- DEBUGGING ADDED ---
-                    if pattern_name == 'double_bottom':
-                        print(f"    DEBUG: Generated class_name: {class_name}")
-                    # --- END DEBUGGING ---
-
-                    # Check if the DataFrame contains the CamelCase class name column
-                    if isinstance(pattern_result, pd.DataFrame) and class_name in pattern_result.columns:
-                        extracted_column = pattern_result[class_name] # Index is tz-naive
-
-                        # --- Make extracted_column.index tz-aware (UTC) to match ticker_results.index ---
-                        if extracted_column.index.tz is None: # Check if it's actually naive
-                            extracted_column.index = extracted_column.index.tz_localize('UTC')
-                        # --- END MODIFICATION ---
-
-                        # --- DEBUGGING ADDED ---
-                        if pattern_name == 'double_bottom':
-                            print(f"    DEBUG: 'extracted_column' after tz_localize('UTC') (first 5 values):\n{extracted_column.head().to_string()}")
-                            print(f"    DEBUG: 'extracted_column' index type after tz_localize: {type(extracted_column.index)}")
-                            print(f"    DEBUG: ticker_results.index type: {type(ticker_results.index)}")
-                            print(f"    DEBUG: 'extracted_column' sum (num Trues) after tz_localize: {extracted_column.sum()}")
-                        # --- END DEBUGGING ---
-
-                        # Now both extracted_column.index and ticker_results.index should be tz-aware UTC.
-                        if not extracted_column.index.equals(ticker_results.index):
-                             extracted_column = extracted_column.reindex(ticker_results.index, fill_value=False)
-                        ticker_results[pattern_name] = extracted_column
-                    elif isinstance(pattern_result, pd.Series):
-                        pattern_series = pattern_result # Index is tz-naive
-
-                        # --- Make pattern_series.index tz-aware (UTC) to match ticker_results.index ---
-                        if pattern_series.index.tz is None: # Check if it's actually naive
-                            pattern_series.index = pattern_series.index.tz_localize('UTC')
-                        # --- END MODIFICATION ---
-                        
-                        # --- DEBUGGING ADDED ---
-                        if pattern_name == 'double_bottom': # Assuming this path could be hit for some patterns
-                            print(f"    DEBUG: 'pattern_series' after tz_localize('UTC') (first 5 values):\n{pattern_series.head().to_string()}")
-                            print(f"    DEBUG: 'pattern_series' index type after tz_localize: {type(pattern_series.index)}")
-                            print(f"    DEBUG: 'pattern_series' sum (num Trues) after tz_localize: {pattern_series.sum()}")
-                        # --- END DEBUGGING ---
-
-                        if not pattern_series.index.equals(ticker_results.index):
-                            pattern_series = pattern_series.reindex(ticker_results.index, fill_value=False)
-                        ticker_results[pattern_name] = pattern_series
+                    if isinstance(pattern_output, pd.DataFrame) and class_name_from_pattern in pattern_output.columns:
+                        bool_series_from_pattern = pattern_output[class_name_from_pattern]
+                    elif isinstance(pattern_output, pd.Series):
+                        bool_series_from_pattern = pattern_output
                     else:
-                        print(f"\n  Warning: Pattern '{pattern_name}' for ticker '{ticker}' returned unexpected type: {type(pattern_result)}. Setting to False.")
-                        ticker_results[pattern_name] = pd.Series(False, index=ticker_results.index) # Ensure it's a Series aligned with index
+                        # print(f"\n  Warning: Pattern '{pattern_name}' for ticker '{ticker}' returned unexpected type: {type(pattern_output)}. Setting to False.") # Commented out
+                        bool_series_from_pattern = pd.Series(False, index=df_for_pattern.index) 
+
+                    # # --- DEBUGGING bool_series_from_pattern DIRECTLY AFTER CREATION (WORKING VERSION) ---
+                    # if pattern_name == 'breakout' and ticker == 'META':
+                    #     print(f"  DEBUG LABEL_SHAPES (META, breakout) - Initial bool_series_from_pattern:")
+                    #     print(f"    Index type: {type(bool_series_from_pattern.index)}")
+                    #     if isinstance(bool_series_from_pattern.index, pd.DatetimeIndex):
+                    #         print(f"    Index tz: {bool_series_from_pattern.index.tzinfo}")
+                    #     print(f"    Length of series: {len(bool_series_from_pattern)}")
+                    #     print(f"    Number of True values: {bool_series_from_pattern.sum()}")
+                    #     target_naive_ts_for_check = pd.Timestamp('2023-09-11 17:17:00') 
+                    #     if isinstance(bool_series_from_pattern.index, pd.DatetimeIndex):
+                    #         if target_naive_ts_for_check in bool_series_from_pattern.index:
+                    #             val_at_target = bool_series_from_pattern.loc[target_naive_ts_for_check]
+                    #             print(f"    Value at {target_naive_ts_for_check} (if DatetimeIndex): {val_at_target}", flush=True)
+                    #         else:
+                    #             print(f"    Target naive ts {target_naive_ts_for_check} NOT IN current DatetimeIndex.", flush=True)
+                    #     elif isinstance(bool_series_from_pattern.index, pd.RangeIndex) and len(bool_series_from_pattern) == len(df_for_pattern):
+                    #         try:
+                    #             iloc_in_df_for_pattern = df_for_pattern.index.get_loc(target_naive_ts_for_check)
+                    #             if iloc_in_df_for_pattern < len(bool_series_from_pattern):
+                    #                 val_at_iloc = bool_series_from_pattern.iloc[iloc_in_df_for_pattern]
+                    #                 print(f"    Value at iloc {iloc_in_df_for_pattern} (corresponds to {target_naive_ts_for_check} in df_for_pattern): {val_at_iloc}", flush=True)
+                    #             else:
+                    #                 print(f"    Iloc {iloc_in_df_for_pattern} out of bounds for bool_series_from_pattern (len {len(bool_series_from_pattern)}).", flush=True)
+                    #         except KeyError:
+                    #             print(f"    Target naive ts {target_naive_ts_for_check} not found in df_for_pattern.index to get iloc.", flush=True)
+                    # # --- END DEBUGGING ---
+
+                    if not isinstance(bool_series_from_pattern.index, pd.DatetimeIndex):
+                        if len(bool_series_from_pattern) == len(df_for_pattern):
+                            bool_series_from_pattern.index = df_for_pattern.index 
+                        else:
+                            # print(f"\n  ERROR: Length mismatch for {pattern_name} on {ticker}. Cannot align RangeIndex result with df_for_pattern. Setting to False.") # Commented out
+                            bool_series_from_pattern = pd.Series(False, index=df_for_pattern.index)
+                    
+                    if bool_series_from_pattern.index.tzinfo is None: 
+                        bool_series_from_pattern = bool_series_from_pattern.tz_localize('UTC', ambiguous='infer')
+                    elif bool_series_from_pattern.index.tzinfo != ticker_results.index.tzinfo: 
+                        bool_series_from_pattern = bool_series_from_pattern.tz_convert(ticker_results.index.tzinfo)
+
+                    bool_series_from_pattern = bool_series_from_pattern.astype(bool)
+                    
+                    final_bool_series = bool_series_from_pattern.reindex(ticker_results.index, fill_value=False)
+                    ticker_results[pattern_name] = final_bool_series.astype(bool) 
 
             except Exception as e:
-                # Print specific error and column names of group_df for debugging
                 print(f"\n  Error applying pattern '{pattern_name}' to ticker '{ticker}': {e}")
-                ticker_results[pattern_name] = pd.Series(False, index=ticker_results.index) # Ensure it's a Series aligned with index
-            print(f"  Finished pattern '{pattern_name}' for ticker '{ticker}'.")
+                import traceback
+                traceback.print_exc()
+                ticker_results[pattern_name] = pd.Series(False, index=ticker_results.index)
+            # print(f"  Finished pattern '{pattern_name}' for ticker '{ticker}'.") # Commented out
 
-        # Reset index to make timestamp a column before appending
         all_results.append(ticker_results.reset_index())
-        print(f"Finished processing for ticker: {ticker}")
+    # print(f"Finished processing for ticker: {ticker}") # Commented out
 
     if not all_results:
-        print("No pattern results generated for any ticker.")
+        # print("No pattern results generated for any ticker.") # Commented out
         return pd.DataFrame()
 
-    # Concatenate results from all tickers
     final_results_df = pd.concat(all_results, ignore_index=True)
-    # Resulting df should be indexed by timestamp, with ticker and pattern bool columns
-
-    print("Pattern detection finished.")
+    # print("Pattern detection finished.") # Commented out
     return final_results_df
 
 def assign_single_label(pattern_results_df: pd.DataFrame) -> pd.Series:

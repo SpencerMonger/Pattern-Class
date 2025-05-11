@@ -41,6 +41,10 @@ from .patterns.triple_top import is_triple_top
 from .patterns.triple_bottom import is_triple_bottom
 # --- End import multi-candle pattern functions ---
 
+# --- Import new Breakout pattern ---
+from .patterns.breakout import Breakout 
+# --- End import new Breakout pattern ---
+
 
 def bullish_hanging_man(candles_df,
                    ohlc=__default_ohlc,
@@ -224,5 +228,14 @@ def double_bottom(candles_df,
                    is_reversed=False,
                    target=None):
     obj = __create_object('DoubleBottom', target) # Assumes class DoubleBottom in double_bottom.py
+    return obj.has_pattern(candles_df, ohlc, is_reversed)
+# --- End wrapper ---
+
+# --- Wrapper for new Breakout class ---
+def breakout(candles_df,
+                   ohlc=__default_ohlc,
+                   is_reversed=False, # Typically False for breakout
+                   target=None):
+    obj = __create_object('Breakout', target) # Assumes class Breakout in breakout.py
     return obj.has_pattern(candles_df, ohlc, is_reversed)
 # --- End wrapper ---
