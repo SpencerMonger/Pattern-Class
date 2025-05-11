@@ -1,0 +1,86 @@
+# Configuration for the backtesting pipeline
+
+# Optional default date range for the entire process.
+# These can be overridden by command-line arguments --start-date and --end-date in run_backtest.py.
+# Format: YYYY-MM-DD
+start_date: '2023-04-12'
+end_date: '2023-09-11'
+
+# Configuration for pattern label generation (replaces predict_historical)
+label_generation:
+  # Source table in ClickHouse containing OHLCV data
+  source_table: "stock_bars"
+  # Define trading direction for each pattern label.
+  # Options: 'ignore', 'ignore', or 'ignore' (or leave blank/comment out to ignore)
+  # 'no_pattern' is always ignored.
+  pattern_directions:
+    # Bearish Patterns -> ignore
+    bearish_engulfing: 'ignore'
+    bearish_harami: 'ignore'
+    dark_cloud_cover: 'ignore'
+    evening_star: 'ignore'
+    evening_star_doji: 'ignore'
+    gravestone_doji: 'ignore' # Often bearish
+    hanging_man: 'ignore'     # Often bearish reversal
+    shooting_star: 'ignore'   # Bearish reversal
+    # Bullish Patterns -> ignore
+    bullish_engulfing: 'ignore'
+    bullish_harami: 'ignore'
+    dragonfly_doji: 'ignore'  # Often bullish
+    hammer: 'ignore'          # Bullish reversal
+    inverted_hammer: 'ignore' # Potential bullish reversal
+    morning_star: 'ignore'
+    morning_star_doji: 'ignore'
+    piercing_pattern: 'ignore'
+    # Neutral/Indecision Patterns -> ignore (can be set to ignore/ignore for experimentation)
+    doji: 'ignore'
+    doji_star: 'ignore'
+    star: 'ignore'
+    # Unverified/Custom Patterns -> ignore unless specifically tested
+    rain_drop: 'ignore'
+    rain_drop_doji: 'ignore'
+
+    # New Multi-Candle Patterns
+    double_top: 'ignore'      # Typically bearish
+    double_bottom: 'long'    # Typically bullish
+    triple_top: 'ignore'      # Typically bearish
+    triple_bottom: 'ignore'    # Typically bullish
+
+  # Whether to use the model prediction as an additional filter for trades.
+  # If true, 'model_predicate_threshold' will be used.
+  # If false, only pattern labels will be considered.
+  use_model_predicate: false
+
+  # Threshold for 'prediction_raw' from 'stock_historical_predictions' table.
+  # Trades will only be considered if prediction_raw >= model_predicate_threshold AND use_model_predicate is true.
+  # Set to a very low number or null/comment out if not used.
+  model_predicate_threshold: 2.9
+
+# Arguments for export_pnl.py
+export_pnl:
+  # Multiplier for the share size used in the export.
+  size_multiplier: 2.5
+
+  # Enable time filter (e.g., 9:30 AM - 4:00 PM EST). Set to true or false.
+  use_time_filter: true
+
+  # Enable random sampling of the P&L results before exporting. Set to true or false.
+  use_random_sample: false
+
+  # Fraction of data to sample if use_random_sample is true (e.g., 0.1 for 10%).
+  # Must be > 0 and <= 1.
+  sample_fraction: 0.1
+
+  # Maximum number of concurrent positions allowed per symbol during export.
+  # Set to null or a large integer to disable the limit.
+  max_concurrent_positions: 3
+
+  # SQL WHERE clause snippets for filtering trades before export - REMOVED ML-specific filters
+  # Filters based on pattern labels will be handled implicitly by 'pattern_directions' in calculate_pnl.py
+  filters: {}
+
+# Settings for P&L calculation (calculate_pnl.py)
+pnl_calculation_settings:
+  # Duration in seconds for which a trade position is held after entry.
+  # Default is 900 seconds (15 minutes).
+  hold_time_seconds: 1800

@@ -1,0 +1,10 @@
+dash
+requests
+pandas
+numpy
+pytz
+scikit-learn
+keras
+tensorflow
+plotly
+flask_cors

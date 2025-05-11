@@ -1,0 +1,20 @@
+# Required Python packages for the backtesting system
+
+clickhouse-connect>=0.7.0 # For ClickHouse interaction
+pandas>=1.3.0        # For data manipulation
+python-dotenv>=0.19.0 # For loading .env files (if used for DB creds)
+# scikit-learn>=1.0.0  # Removed: No longer needed for ML model loading
+openpyxl>=3.0.0      # Optional: Potentially needed by pandas for Excel I/O
+requests>=2.25.0     # Optional: Potentially used by underlying libraries
+
+# Added for config file loading
+PyYAML>=5.4.0
+
+# Added for progress bars (used in label generation)
+tqdm>=4.60.0
+
+# Added pytz for timezone handling in db_utils (Deprecated: use zoneinfo)
+# pytz>=2021.3
+
+# Note: zoneinfo (used for timezones in export_pnl) is built-in since Python 3.9.
+# If using Python < 3.9, install backports.zoneinfo: pip install backports.zoneinfo 
