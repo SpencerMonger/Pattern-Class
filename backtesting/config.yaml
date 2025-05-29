@@ -3,59 +3,59 @@
 # Optional default date range for the entire process.
 # These can be overridden by command-line arguments --start-date and --end-date in run_backtest.py.
 # Format: YYYY-MM-DD
-start_date: '2023-04-12'
-end_date: '2023-09-11'
+start_date: '2023-10-01'
+end_date: '2024-04-01'
 
 # Configuration for pattern label generation (replaces predict_historical)
 label_generation:
   # Source table in ClickHouse containing OHLCV data
   source_table: "stock_bars"
   # Define trading direction for each pattern label.
-  # Options: 'ignore', 'ignore', or 'ignore' (or leave blank/comment out to ignore)
-  # 'no_pattern' is always ignored.
+  # Options: 'long', 'long', or 'long' (or leave blank/comment out to long)_
+  # 'no_pattern' is always longd.
   pattern_directions:
-    # Bearish Patterns -> ignore
-    bearish_engulfing: 'ignore'
-    bearish_harami: 'ignore'
-    dark_cloud_cover: 'ignore'
-    evening_star: 'ignore'
-    evening_star_doji: 'ignore'
-    gravestone_doji: 'ignore' # Often bearish
-    hanging_man: 'ignore'     # Often bearish reversal
-    shooting_star: 'ignore'   # Bearish reversal
-    # Bullish Patterns -> ignore
-    bullish_engulfing: 'ignore'
-    bullish_harami: 'ignore'
-    dragonfly_doji: 'ignore'  # Often bullish
-    hammer: 'ignore'          # Bullish reversal
-    inverted_hammer: 'ignore' # Potential bullish reversal
-    morning_star: 'ignore'
-    morning_star_doji: 'ignore'
-    piercing_pattern: 'ignore'
-    # Neutral/Indecision Patterns -> ignore (can be set to ignore/ignore for experimentation)
-    doji: 'ignore'
-    doji_star: 'ignore'
-    star: 'ignore'
-    # Unverified/Custom Patterns -> ignore unless specifically tested
-    rain_drop: 'ignore'
-    rain_drop_doji: 'ignore'
-    breakout: 'long'      # New Breakout pattern added
+    bearish_engulfing: 'long'
+    bearish_harami: 'long'
+    dark_cloud_cover: 'long'
+    evening_star: 'long'
+    evening_star_doji: 'long'
+    gravestone_doji: 'long'
+    hanging_man: 'long'    
+    shooting_star: 'ignore'  
+    # Bullish Patterns -> long
+    bullish_engulfing: 'long'
+    bullish_harami: 'long'
+    dragonfly_doji: 'long'  
+    hammer: 'long'          
+    inverted_hammer: 'long' 
+    morning_star: 'long'
+    morning_star_doji: 'long'
+    piercing_pattern: 'long'
+    doji: 'long'
+    doji_star: 'long'
+    star: 'long'
+    rain_drop: 'long'
+    rain_drop_doji: 'long'
+    breakout: 'ignore'     
 
     # New Multi-Candle Patterns
-    double_top: 'ignore'      # Typically bearish
-    double_bottom: 'ignore'    # Typically bullish
-    triple_top: 'ignore'      # Typically bearish
-    triple_bottom: 'ignore'    # Typically bullish
+    double_top: 'ignore'     
+    double_bottom: 'ignore'    
+    triple_top: 'ignore'      
+    triple_bottom: 'ignore'    
 
   # Whether to use the model prediction as an additional filter for trades.
   # If true, 'model_predicate_threshold' will be used.
   # If false, only pattern labels will be considered.
-  use_model_predicate: false
+  use_model_predicate: true
 
   # Threshold for 'prediction_raw' from 'stock_historical_predictions' table.
   # Trades will only be considered if prediction_raw >= model_predicate_threshold AND use_model_predicate is true.
   # Set to a very low number or null/comment out if not used.
-  model_predicate_threshold: 2.9
+  model_predicate_threshold: 2.7
+
+  # Whether to use the MACD value vs signal as an additional filter for trades.
+  use_macd_predicate: false
 
 # Arguments for export_pnl.py
 export_pnl:
@@ -74,7 +74,7 @@ export_pnl:
 
   # Maximum number of concurrent positions allowed per symbol during export.
   # Set to null or a large integer to disable the limit.
-  max_concurrent_positions: 500
+  max_concurrent_positions: 3
 
   # SQL WHERE clause snippets for filtering trades before export - REMOVED ML-specific filters
   # Filters based on pattern labels will be handled implicitly by 'pattern_directions' in calculate_pnl.py
@@ -84,4 +84,4 @@ export_pnl:
 pnl_calculation_settings:
   # Duration in seconds for which a trade position is held after entry.
   # Default is 900 seconds (15 minutes).
-  hold_time_seconds: 1800
+  hold_time_seconds: 900

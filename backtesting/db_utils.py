@@ -170,6 +170,25 @@ class ClickHouseClient:
             print(f"Error creating table {table_name}: {e}\nQuery: {query}")
             raise # Re-raise to signal failure
 
+    def get_table_columns(self, table_name: str) -> List[str]:
+        """Retrieves a list of column names for the specified table."""
+        if not self.client:
+            print("Error: ClickHouse client is not connected.")
+            return []
+        
+        query = f"SELECT name FROM system.columns WHERE database = \'{self.database}\' AND table = \'{table_name}\' ORDER BY position"
+        
+        try:
+            result_df = self.client.query_df(query)
+            if result_df is not None and not result_df.empty:
+                return result_df['name'].tolist()
+            else:
+                print(f"No columns found for table '{self.database}'.'{table_name}', or table does not exist.")
+                return []
+        except Exception as e:
+            print(f"Error retrieving columns for table {table_name}: {e}\nQuery: {query}")
+            return []
+
     # Helper to ensure UTC similar to endpoints/db.py but synchronous
     def _ensure_utc(self, timestamp: Any) -> Optional[datetime]:
         if timestamp is None: return None

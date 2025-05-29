@@ -8,7 +8,7 @@ import numpy as np
 # Removed sklearn imports as confusion matrix/accuracy are no longer used for labels
 # from sklearn.metrics import confusion_matrix, mean_squared_error, mean_absolute_error
 import re
-from typing import Set, Tuple, Dict # Added Dict
+from typing import Set, Tuple, Dict, Optional # Added Dict and Optional
 
 # Ensure the backtesting directory is in the path
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -19,16 +19,17 @@ OHLC_DIR = os.path.join(os.path.dirname(script_dir), 'ohlc_detection')
 if OHLC_DIR not in sys.path:
     sys.path.insert(0, OHLC_DIR)
 
-# Import the main functions from the other scripts
+# Import the main functions from the other scripts using direct imports
+# as sys.path.append(script_dir) should make them available
 try:
-    # <<< Updated import: generate_pattern_labels instead of predict_historical >>>
     from generate_pattern_labels import run_label_generation
     from calculate_pnl import run_pnl_calculation, SHARE_SIZE
     from export_pnl import export_pnl_to_csv
     from db_utils import ClickHouseClient
+    from macd import update_labels_with_macd_info
 except ImportError as e:
     print(f"Error importing required functions: {e}")
-    print("Ensure generate_pattern_labels.py, calculate_pnl.py, export_pnl.py, label_shapes.py (in ohlc_detection), and db_utils.py are accessible.")
+    print("Ensure generate_pattern_labels.py, calculate_pnl.py, export_pnl.py, db_utils.py, macd.py (all in backtesting directory) and label_shapes.py (in ohlc_detection) are accessible and sys.path is correct.")
     sys.exit(1)
 
 def load_config(config_path: str) -> dict:
@@ -47,7 +48,7 @@ def load_config(config_path: str) -> dict:
         print(f"Error parsing config file '{config_path}': {e}")
         sys.exit(1)
 
-def validate_date(date_str: str | None) -> str | None:
+def validate_date(date_str: Optional[str]) -> Optional[str]: # Changed to Optional[str]
     """Validates date string format YYYY-MM-DD and ensures leading zeros."""
     if date_str is None:
         return None
@@ -151,8 +152,8 @@ def calculate_and_print_metrics(
         # Calculate the multiplier relative to the base SHARE_SIZE constant
         # Avoid division by zero if SHARE_SIZE is 0
         base_share_size = float(SHARE_SIZE) if SHARE_SIZE > 0 else 1.0
-        metrics_df['effective_multiplier'] = (metrics_df['share_size'] * size_multiplier) / base_share_size
-        metrics_df['adjusted_pnl'] = metrics_df['pnl_total'] * metrics_df['effective_multiplier'] / (metrics_df['share_size'] / base_share_size)
+        # metrics_df['effective_multiplier'] = (metrics_df['share_size'] * size_multiplier) / base_share_size
+        # metrics_df['adjusted_pnl'] = metrics_df['pnl_total'] * metrics_df['effective_multiplier'] / (metrics_df['share_size'] / base_share_size)
         # Simpler adjustment: pnl_total in DB was base size * diff. We want (base size * multiplier) * diff
         # So, just multiply pnl_total by the size_multiplier used in export.
         metrics_df['adjusted_pnl'] = metrics_df['pnl_total'] * size_multiplier
@@ -290,19 +291,46 @@ def main():
         print("Aborting pipeline.")
         sys.exit(1)
 
+    # === Step 1.5: Update Labels with MACD Info (if enabled) ===
+    # This step runs AFTER label generation and BEFORE P&L calculation
+    print("\n" + "="*10 + " Step 1.5: Updating Labels with MACD Info " + "="*10)
+    if config.get('label_generation', {}).get('use_macd_predicate', False):
+        macd_update_db_client: Optional[ClickHouseClient] = None
+        try:
+            print("MACD predicate is ENABLED. Attempting to update labels table...")
+            macd_update_db_client = ClickHouseClient()
+            update_labels_with_macd_info(
+                db_client=macd_update_db_client,
+                config=config,
+                start_date=start_date, # Pass validated start_date
+                end_date=end_date     # Pass validated end_date
+            )
+            print("Label update with MACD info step completed.")
+        except Exception as e_macd_update:
+            print(f"\nError during MACD label update step: {e_macd_update}")
+            import traceback
+            traceback.print_exc()
+            # Decide if this is fatal. For now, we'll print a warning and continue.
+            print("Warning: MACD label update failed. P&L calculation might not use MACD filtering as expected.")
+        finally:
+            if macd_update_db_client:
+                macd_update_db_client.close()
+                print("Closed ClickHouse connection for MACD label update.")
+    else:
+        print("MACD predicate is DISABLED in config. Skipping label update with MACD info.")
+    print("="*10 + " End Step 1.5: MACD Label Update " + "="*10 + "\n")
+
     # === Step 2: Calculate P&L ===
     print("="*10 + " Step 2: Calculating P&L (Pattern Based) " + "="*10)
     try:
-        # <<< Get pattern directions from label_config >>>
         pattern_directions = label_config.get('pattern_directions', {})
         if not pattern_directions:
              print("Warning: 'pattern_directions' not found or empty in config under 'label_generation'. P&L step might not generate trades.")
 
-        # <<< Get model predicate threshold from label_config >>>
-        use_model_predicate = label_config.get('use_model_predicate', False) # Default to False if not present
+        use_model_predicate = label_config.get('use_model_predicate', False)
         model_predicate_threshold_config = label_config.get('model_predicate_threshold', None)
         
-        effective_model_predicate_threshold = None
+        effective_model_predicate_threshold: Optional[float] = None
         if use_model_predicate:
             if model_predicate_threshold_config is not None:
                 try:
@@ -315,27 +343,27 @@ def main():
         else:
             print("Model predicate DISABLED by config ('use_model_predicate': false).")
 
-        # <<< Get hold_time_seconds for P&L calculation >>>
         default_hold_time = 15 * 60 # 15 minutes
-        hold_time_seconds = pnl_calc_config.get('hold_time_seconds', default_hold_time)
+        hold_time_seconds_config = pnl_calc_config.get('hold_time_seconds', default_hold_time)
+        hold_time_seconds: int = default_hold_time
         try:
-            hold_time_seconds = int(hold_time_seconds)
+            hold_time_seconds = int(hold_time_seconds_config)
             if hold_time_seconds <= 0:
-                print(f"Warning: 'hold_time_seconds' ({hold_time_seconds}) must be positive. Using default: {default_hold_time}s")
+                print(f"Warning: 'hold_time_seconds' ({hold_time_seconds_config}) must be positive. Using default: {default_hold_time}s")
                 hold_time_seconds = default_hold_time
             else:
                 print(f"Using P&L hold time: {hold_time_seconds} seconds.")
         except ValueError:
-            print(f"Warning: Invalid 'hold_time_seconds' value '{hold_time_seconds}'. Using default: {default_hold_time}s")
+            print(f"Warning: Invalid 'hold_time_seconds' value '{hold_time_seconds_config}'. Using default: {default_hold_time}s")
             hold_time_seconds = default_hold_time
 
-        # <<< Pass pattern_directions map >>>
         run_pnl_calculation(
             pattern_directions=pattern_directions,
             start_date=start_date,
             end_date=end_date,
-            model_predicate_threshold=effective_model_predicate_threshold, # <<< Pass effective threshold
-            hold_time_seconds=hold_time_seconds # <<< Pass hold time
+            model_predicate_threshold=effective_model_predicate_threshold,
+            hold_time_seconds=hold_time_seconds,
+            config=config
             )
         print("\n" + " P&L calculation step completed successfully. " + "\n")
     except Exception as e:
@@ -347,17 +375,7 @@ def main():
 
     # === Post-Step 2: DIAGNOSTIC & Conditional TRUNCATE of stock_pnl ===
     print("\n" + "="*10 + " DIAGNOSTIC & TRUNCATE: Inspecting stock_pnl after Step 2 " + "="*10)
-    diag_db_client = None
-    step2_processed_data = True # Assume Step 2 processed data unless its log says otherwise
-    # This is a heuristic based on Step 2's log output. 
-    # A better way would be for run_pnl_calculation to return a status.
-    # For now, we'll check if the log line "No tickers found... Nothing to process." was effectively the outcome.
-    # We need to capture this state from run_pnl_calculation's execution or logs if possible.
-    # Let's assume for now: if P&L calculation step *completed successfully* but intended to do nothing,
-    # it would have logged "Nothing to process". We need a way to confirm this state.
-    # Since we can't easily parse prior logs here, we'll rely on the row count.
-    # If run_pnl_calculation is supposed to leave it empty, and it's not, then we truncate.
-
+    diag_db_client: Optional[ClickHouseClient] = None
     try:
         diag_db_client = ClickHouseClient()
         pnl_table_name = "stock_pnl"
@@ -372,24 +390,12 @@ def main():
                 actual_row_count = count_result_df.iloc[0,0]
                 print(f"  DIAGNOSTIC: Total rows in `{db_name}`.`{pnl_table_name}` after Step 2: {actual_row_count}")
                 
-                # --- TRUNCATE LOGIC IS COMMENTED OUT ---
-                # The original condition for truncation was 'if actual_row_count > 0:'
-                # We keep the print statement that was inside this original 'if' block for context,
-                # but the truncation itself is disabled.
                 if actual_row_count > 0:
-                    # This print statement was part of the original logic when truncation was active.
-                    # print(f"  DIAGNOSTIC: stock_pnl has {actual_row_count} rows. Step 2 indicated it found no tradable labels to process, so these are likely stale. Attempting TRUNCATE.")
-                    pass # Explicitly do nothing here where truncation was
-                # else: 
-                    # No specific else action was here for the inner if, related to truncation
-                #     pass
-                # --- END OF COMMENTED OUT TRUNCATE LOGIC ---
+                    pass 
             else:
                 print(f"  DIAGNOSTIC: Could not get row count for `{db_name}`.`{pnl_table_name}` or table might be empty.")
 
-            # Query for distinct labels. This part should run to show current state.
-            # Ensure we query the count again in case table was empty or just created.
-            if diag_db_client.table_exists(pnl_table_name): # Check again before querying for distinct labels
+            if diag_db_client.table_exists(pnl_table_name):
                 count_query_for_distinct = f"SELECT count() FROM `{db_name}`.`{pnl_table_name}`"
                 current_count_df_for_distinct = diag_db_client.query_dataframe(count_query_for_distinct)
                 if current_count_df_for_distinct is not None and not current_count_df_for_distinct.empty and current_count_df_for_distinct.iloc[0,0] > 0:
@@ -406,8 +412,10 @@ def main():
                         print(distinct_labels_df.to_string(index=False))
                     else:
                         print(f"  DIAGNOSTIC: Could not retrieve distinct pattern_labels from `{db_name}`.`{pnl_table_name}` (but table had rows). Df was None/empty.")
-                else:
-                     print(f"  DIAGNOSTIC: Table `{db_name}`.`{pnl_table_name}` is now confirmed empty or inaccessible after potential TRUNCATE.")       
+                elif actual_row_count == 0: # This case means table was empty before this check or became empty.
+                     print(f"  DIAGNOSTIC: Table `{db_name}`.`{pnl_table_name}` is confirmed empty or just became empty.")
+                else: # current_count_df_for_distinct is None, empty or count is 0, but actual_row_count was >0 or -1
+                     print(f"  DIAGNOSTIC: Table `{db_name}`.`{pnl_table_name}` is inaccessible or became empty unexpectedly after initial count.")       
             elif actual_row_count == 0:
                  print(f"  DIAGNOSTIC: Table `{db_name}`.`{pnl_table_name}` was already empty after Step 2, as expected.")
 
@@ -425,24 +433,23 @@ def main():
     print("="*10 + " END DIAGNOSTIC & TRUNCATE " + "="*10 + "\n")
 
     # === Step 3: Export P&L Results ===
-    exported_trade_ids = set()
+    exported_trade_ids: Set[Tuple[str, pd.Timestamp]] = set()
     size_multiplier = 1.0 # Initialize default outside try block
     print("="*10 + " Step 3: Exporting P&L Results " + "="*10)
     try:
-        # Fetch export arguments from export_config
         size_multiplier = float(export_config.get('size_multiplier', 1.0))
         use_time_filter = bool(export_config.get('use_time_filter', False))
         use_random_sample = bool(export_config.get('use_random_sample', False))
         sample_fraction = float(export_config.get('sample_fraction', 0.1))
         max_concurrent_positions_cfg = export_config.get('max_concurrent_positions', None)
-        max_concurrent_positions = int(max_concurrent_positions_cfg) if max_concurrent_positions_cfg is not None else None
+        max_concurrent_positions: Optional[int] = None
+        if max_concurrent_positions_cfg is not None:
+            max_concurrent_positions = int(max_concurrent_positions_cfg)
 
-        # Validate export-specific args
         if size_multiplier <= 0: raise ValueError("export_pnl.size_multiplier must be positive.")
         if use_random_sample and not (0 < sample_fraction <= 1): raise ValueError(f"export_pnl.sample_fraction must be > 0 and <= 1, got: {sample_fraction}")
         if max_concurrent_positions is not None and max_concurrent_positions <= 0: raise ValueError(f"export_pnl.max_concurrent_positions must be positive integer if set, got: {max_concurrent_positions}")
 
-        # Call export function (no longer needs export_config['filters'])
         exported_trade_ids = export_pnl_to_csv(
             size_multiplier=size_multiplier,
             use_time_filter=use_time_filter,
@@ -468,11 +475,10 @@ def main():
     # === Step 4: Calculate and Print Performance Metrics ===
     print("="*10 + " Step 4: Calculating Performance Metrics (Pattern P&L) " + "="*10)
     try:
-        # Call the modified metrics function
         calculate_and_print_metrics(
             exported_trade_ids=exported_trade_ids,
-            config=config, # Pass full config for context if needed
-            size_multiplier=size_multiplier # Pass the multiplier used in export
+            config=config, 
+            size_multiplier=size_multiplier
         )
         print("\nMetrics calculation step completed.")
     except Exception as e:
@@ -480,7 +486,6 @@ def main():
         import traceback
         traceback.print_exc()
         print("Warning: Metrics calculation failed, but prior steps may have succeeded.")
-        # sys.exit(1)
 
     print("\n" + "="*10 + " Pattern Backtesting Pipeline Completed " + "="*10)
 

@@ -7,19 +7,19 @@ import argparse
 import sys
 import yaml
 
-# Assuming db_utils and label_shapes are accessible
-# Add ohlc_detection to path to find label_shapes
+# Restoring original sys.path manipulations
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) # Add parent dir for db_utils
 OHLC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'ohlc_detection')
 if OHLC_DIR not in sys.path:
     sys.path.insert(0, OHLC_DIR) # Insert ohlc_detection path
 
 try:
-    from db_utils import ClickHouseClient
-    from ohlc_detection.label_shapes import generate_labels_from_db # <<< Changed import
+    from db_utils import ClickHouseClient # Reverted to direct import
+    from ohlc_detection.label_shapes import generate_labels_from_db
 except ImportError as e:
-    print(f"Error importing required modules: {e}")
-    print("Ensure db_utils.py is in the parent directory and label_shapes.py is in 'ohlc_detection' directory.")
+    print(f"Error importing required modules in generate_pattern_labels.py: {e}")
+    # Adjusted error message to reflect restored import style
+    print("Ensure db_utils.py can be found (possibly via parent directory in sys.path) and label_shapes.py is in 'ohlc_detection' directory (also in sys.path).")
     sys.exit(1)
 
 # --- Configuration --- 
@@ -58,6 +58,7 @@ def run_label_generation(config: Dict, start_date: str | None = None, end_date: 
     try:
         # 1. Initialize Database Connection
         db_client = ClickHouseClient()
+        db_name = db_client.database # Get database name
 
         # --- Get pattern_directions from config --- #
         label_gen_config = config.get('label_generation', {})
@@ -91,25 +92,50 @@ def run_label_generation(config: Dict, start_date: str | None = None, end_date: 
         if 'pattern_label' not in dynamic_target_schema:
              print("Warning: 'pattern_label' column missing, adding as String.")
              dynamic_target_schema['pattern_label'] = 'String'
+        
+        # --- Add macd_allowed to the schema if not present --- #
+        # This will be the target column for the MACD predicate True/False
+        # Defaulting to 0 (False) initially. It will be updated by a later step.
+        if 'macd_allowed' not in dynamic_target_schema:
+            print("Adding 'macd_allowed' (UInt8) to target schema, default 0.")
+            dynamic_target_schema['macd_allowed'] = 'UInt8'
         # --- End Schema Creation --- #
 
-        # 3. Drop and Recreate Target Table using dynamic schema
-        print(f"\nDropping table {TARGET_TABLE} if it exists...")
-        db_client.drop_table_if_exists(TARGET_TABLE)
-        print(f"Creating table {TARGET_TABLE} with dynamic schema...")
-        db_client.create_table_if_not_exists(
-            TARGET_TABLE,
-            dynamic_target_schema, # <<< Use dynamic schema
-            TARGET_ENGINE,
-            TARGET_ORDER_BY,
-            TARGET_PRIMARY_KEY
-        )
+        # 3. Create or Alter Target Table using dynamic schema
         if not db_client.table_exists(TARGET_TABLE):
-            raise RuntimeError(f"Failed to create target table {TARGET_TABLE}")
+            print(f"Table {TARGET_TABLE} does not exist. Creating with dynamic schema...")
+            db_client.create_table_if_not_exists(
+                TARGET_TABLE,
+                dynamic_target_schema, 
+                TARGET_ENGINE,
+                TARGET_ORDER_BY,
+                TARGET_PRIMARY_KEY
+            )
+            if not db_client.table_exists(TARGET_TABLE):
+                raise RuntimeError(f"Failed to create target table {TARGET_TABLE}")
+            print(f"Table {TARGET_TABLE} created successfully.")
+        else:
+            print(f"Table {TARGET_TABLE} already exists. Checking for 'macd_allowed' column...")
+            # Check if macd_allowed column exists
+            table_columns = db_client.get_table_columns(TARGET_TABLE)
+            if 'macd_allowed' not in table_columns:
+                print(f"Column 'macd_allowed' not found in {TARGET_TABLE}. Adding column...")
+                alter_query = f"ALTER TABLE `{db_name}`.`{TARGET_TABLE}` ADD COLUMN macd_allowed UInt8 DEFAULT 0"
+                db_client.execute(alter_query)
+                print("Column 'macd_allowed' added successfully with default 0.")
+            else:
+                print("Column 'macd_allowed' already exists.")
+        
         print(f"Table {TARGET_TABLE} is ready.")
 
         # 4. Prepare data for insertion
-        # Data is already in labels_df_reset
+        # Add macd_allowed column to the DataFrame if it's not there from label generation step
+        if 'macd_allowed' not in labels_df_reset.columns:
+            labels_df_reset['macd_allowed'] = 0 # Default to 0 (False)
+        else:
+            # If it somehow came from generate_labels_from_db, ensure it's int for ClickHouse UInt8
+            labels_df_reset['macd_allowed'] = labels_df_reset['macd_allowed'].fillna(0).astype(int)
+
         # Ensure columns match the dynamic schema keys (for correct order)
         columns_to_insert = list(dynamic_target_schema.keys())
         labels_df_final = labels_df_reset[columns_to_insert] # Select/reorder based on dynamic schema

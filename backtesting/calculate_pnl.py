@@ -1,13 +1,13 @@
 import os
 import datetime as dt_module
-from datetime import timedelta
+from datetime import timedelta, datetime
 import pandas as pd
 import argparse
-from typing import Dict
+from typing import Dict, Optional
 import yaml # Added missing import for standalone execution
 
 # Assuming db_utils is in the same directory
-from db_utils import ClickHouseClient
+from db_utils import ClickHouseClient # Reverted to direct import
 
 # --- Configuration ---
 # Database table names
@@ -58,10 +58,11 @@ QUOTE_TIME_BUFFER = timedelta(hours=1, minutes=10)
 
 def run_pnl_calculation(
     pattern_directions: Dict[str, str], 
-    start_date: str | None = None, 
-    end_date: str | None = None, 
-    model_predicate_threshold: float | None = None,
-    hold_time_seconds: int | None = None # <<< Added hold_time_seconds
+    start_date: Optional[str] = None, 
+    end_date: Optional[str] = None, 
+    model_predicate_threshold: Optional[float] = None,
+    hold_time_seconds: Optional[int] = None,
+    config: Optional[Dict] = None
 ):
     """Connects to DB, calculates P&L based on pattern labels and directions, and stores it."""
     db_client = None
@@ -240,8 +241,14 @@ def run_pnl_calculation(
                 # --- Build model predicate SQL filter ---
                 model_predicate_filter_sql = ""
                 if effective_model_predicate_threshold is not None:
-                    # Ensures that the join to shp was successful on timestamp if the predicate is active
                     model_predicate_filter_sql = f"AND shp.timestamp IS NOT NULL AND shp.prediction_raw >= {effective_model_predicate_threshold}"
+
+                # --- Build MACD predicate SQL filter (directly on labels_chunk.macd_allowed) ---
+                macd_predicate_condition_sql = ""
+                if config and config.get('label_generation', {}).get('use_macd_predicate', False):
+                    macd_predicate_condition_sql = f"AND lc.macd_allowed = 1"
+                else:
+                    print("MACD predicate is disabled in config or config not provided to P&L; MACD filter will not be applied in P&L query.")
 
                 insert_pnl_query = f"""
                 INSERT INTO `{db_name}`.`{PNL_TABLE}`
@@ -251,6 +258,7 @@ def run_pnl_calculation(
                         timestamp AS label_timestamp,
                         ticker,
                         pattern_label,
+                        macd_allowed, # <<< Select existing macd_allowed from labels_chunk (stock_historical_labels)
                         label_timestamp + INTERVAL {ENTRY_OFFSET_SECONDS} SECOND AS target_entry_time,
                         label_timestamp + INTERVAL {calculated_exit_offset_seconds} SECOND AS target_exit_time,
                         -- Determine position based on pattern label direction config
@@ -309,6 +317,7 @@ def run_pnl_calculation(
                     exit_bid_price > 0 AND exit_ask_price > 0 AND
                     (pos_long = 1 OR pos_short = 1) -- Ensure it was actually a trade
                     {model_predicate_filter_sql} -- <<< Apply model predicate filter
+                    {macd_predicate_condition_sql} -- <<< Apply MACD predicate filter directly on lc.macd_allowed
                 """
 
                 # Execute the query
@@ -411,7 +420,8 @@ if __name__ == "__main__":
         pattern_directions=pattern_directions_map,
         start_date=args.start_date,
         end_date=args.end_date,
-        model_predicate_threshold=None, # <<< Pass None for standalone run
-        hold_time_seconds=None # <<< Pass None for standalone, will use default
+        model_predicate_threshold=None,
+        hold_time_seconds=None,
+        config=config_full if 'config_full' in locals() else {}
     )
     print("===============================================")
