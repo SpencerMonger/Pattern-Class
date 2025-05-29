@@ -1,21 +1,27 @@
 import os
+import logging
 import pandas as pd
 import csv
 from datetime import datetime, time
 from zoneinfo import ZoneInfo
 import argparse
 from collections import defaultdict
-from typing import Set, Tuple, Dict # Added Dict
+from typing import Set, Tuple, Dict, Optional
+import warnings
 
 # Assuming db_utils is in the same directory
 from db_utils import ClickHouseClient
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # --- Configuration ---
 # Database table name to read PNL results from
 PNL_TABLE = "stock_pnl"
 
 # Output CSV file path
-OUTPUT_DIR = r"C:\Users\spenc\Downloads\Dev Files\datahead_v3\backtesting\files" # Escaped backslashes for Windows path
+OUTPUT_DIR = r"C:\Users\spenc\Downloads\Dev Files\IMG-CLASS\backtesting\files" # Escaped backslashes for Windows path
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # CSV header (remains the same)
@@ -65,21 +71,17 @@ def export_pnl_to_csv(
 
         # 2. Check if PNL table exists
         if not db_client.table_exists(PNL_TABLE):
-            print(f"Error: PnL table '{PNL_TABLE}' not found. Please run calculate_pnl.py first.")
-            return exported_trade_identifiers # Return empty set
+            logger.error(f"P&L table '{PNL_TABLE}' not found. Please run calculate_pnl.py first.")
+            return exported_trade_identifiers
 
         # --- Filters --- 
-        # SQL filters based on prediction scores/categories are removed.
-        # Filtering based on pattern labels happens in calculate_pnl.py (via pattern_directions).
-        # We only apply date filters here.
         active_sql_filters = []
         if start_date_str:
-            # Filter based on the original label timestamp stored in the PNL table
             active_sql_filters.append(f"toDate(label_timestamp) >= toDate('{start_date_str}')")
-            print(f"Date filter: Starting from {start_date_str}")
+            logger.info(f"Date filter: Starting from {start_date_str}")
         if end_date_str:
             active_sql_filters.append(f"toDate(label_timestamp) <= toDate('{end_date_str}')")
-            print(f"Date filter: Ending at {end_date_str}")
+            logger.info(f"Date filter: Ending at {end_date_str}")
 
         combined_sql_filter_clause = " AND ".join(f"({f})" for f in active_sql_filters)
         where_clause = f"WHERE {combined_sql_filter_clause}" if combined_sql_filter_clause else ""
@@ -87,96 +89,91 @@ def export_pnl_to_csv(
 
         # Time filter info
         if use_time_filter:
-            print("Time filter ENABLED (will be applied after fetching).")
+            logger.info("Time filter ENABLED (will be applied after fetching).")
         else:
-            print("Time filter is DISABLED.")
+            logger.info("Time filter is DISABLED.")
 
         # --- Construct Base Query Parts --- 
         base_table_expression = f"`{db_name}`.`{PNL_TABLE}`"
 
         # --- Handle Sampling (Post-fetch) --- 
         if use_random_sample:
-            print(f"Random sampling ENABLED: {sample_fraction * 100:.1f}% (Applied after fetch)")
+            logger.info(f"Random sampling ENABLED: {sample_fraction * 100:.1f}% (Applied after fetch)")
             if not (0 < sample_fraction <= 1):
-                print("Error: Sample fraction must be between 0 (exclusive) and 1 (inclusive). Aborting.")
+                logger.error("Sample fraction must be between 0 (exclusive) and 1 (inclusive). Aborting.")
                 return exported_trade_identifiers
         else:
-            print("Random sampling DISABLED.")
+            logger.info("Random sampling DISABLED.")
 
         # --- Handle Max Concurrent Positions --- 
         if max_concurrent_positions is not None:
             if max_concurrent_positions <= 0:
-                print("Error: Max concurrent positions must be a positive integer. Aborting.")
+                logger.error("Max concurrent positions must be a positive integer. Aborting.")
                 return exported_trade_identifiers
-            print(f"Max concurrent positions per symbol ENABLED: {max_concurrent_positions}")
+            logger.info(f"Max concurrent positions per symbol ENABLED: {max_concurrent_positions}")
         else:
-            print("Max concurrent positions per symbol DISABLED.")
+            logger.info("Max concurrent positions per symbol DISABLED.")
 
-        # --- Final Query Construction (Fetch data based ONLY on date filters) --- 
+        # --- Count rows matching filters ---
         count_query = f"SELECT count() FROM {base_table_expression} {where_clause}"
-        print(f"Counting rows with date filter: {combined_sql_filter_clause if combined_sql_filter_clause else 'None'}...")
+        logger.info(f"Counting rows with date filter: {combined_sql_filter_clause if combined_sql_filter_clause else 'None'}...")
         count_result = db_client.execute(count_query)
         if not count_result or not count_result.result_rows:
-            print(f"Error: Could not get row count from {PNL_TABLE} with applied filters.")
+            logger.error(f"Could not get row count from {PNL_TABLE} with applied filters.")
             return exported_trade_identifiers
         total_rows_found = count_result.result_rows[0][0]
         if total_rows_found == 0:
-            print(f"No PNL data found matching date filters to export.")
+            logger.warning(f"No P&L data found matching date filters to export.")
             return exported_trade_identifiers
 
-        print(f"Total P&L records matching date filters found: {total_rows_found}. Fetching all...")
+        logger.info(f"Total P&L records matching date filters found: {total_rows_found:,}. Fetching all...")
 
-        # 4. Fetch all data matching date filters, ordered by label timestamp
-        # Select all columns needed, including the label_timestamp for identifiers
+        # 4. Fetch all data matching date filters
         query = f"""
         SELECT * 
         FROM {base_table_expression} {where_clause}
-        ORDER BY label_timestamp -- Order by label time initially for consistency
+        ORDER BY label_timestamp
         """
         pnl_df = db_client.query_dataframe(query)
-        print(f"Fetched {len(pnl_df)} records.")
+        logger.info(f"Fetched {len(pnl_df):,} records.")
 
         if pnl_df is None or pnl_df.empty:
-            print("No data fetched or an error occurred. Aborting.")
+            logger.error("No data fetched or an error occurred. Aborting.")
             return exported_trade_identifiers
 
         # --- Apply Sampling in Pandas (if enabled) --- 
         if use_random_sample and not pnl_df.empty:
             original_size = len(pnl_df)
             pnl_df = pnl_df.sample(frac=sample_fraction)
-            print(f"Applied pandas sampling ({sample_fraction * 100:.1f}%): {original_size} -> {len(pnl_df)} rows.")
+            logger.info(f"Applied sampling ({sample_fraction * 100:.1f}%): {original_size:,} -> {len(pnl_df):,} rows.")
             if pnl_df.empty:
-                print("DataFrame became empty after sampling. No data to export.")
+                logger.warning("DataFrame became empty after sampling. No data to export.")
                 return exported_trade_identifiers
         # --- End Sampling ---
 
-        print("Transforming data...")
+        logger.info("Transforming data...")
 
         # Ensure timestamp columns are pandas Timestamps (UTC)
-        # Include label_timestamp here as it's used for identifiers
         for col in ['label_timestamp', 'entry_timestamp', 'exit_timestamp']:
             if col in pnl_df.columns:
                 pnl_df[col] = pd.to_datetime(pnl_df[col], utc=True)
             else:
-                print(f"Warning: Expected timestamp column '{col}' not found in PNL data.")
-                # Handle missing column -> return empty identifiers as we can't proceed safely
+                logger.error(f"Expected timestamp column '{col}' not found in P&L data.")
                 return exported_trade_identifiers
 
         # 5. Generate Trade Legs
+        logger.info("Generating trade legs...")
         all_trade_legs = []
-        # Use a dictionary to map original PNL table index to the trade identifier
-        # This avoids repeatedly accessing the DataFrame row inside the loop
         trade_id_map = {
             idx: (row['ticker'], row['label_timestamp'])
             for idx, row in pnl_df[['ticker', 'label_timestamp']].iterrows()
         }
 
         for idx, row in pnl_df.iterrows():
-            # Use idx to lookup the identifier
             if idx not in trade_id_map:
-                 continue # Should not happen
+                continue
             trade_identifier = trade_id_map[idx]
-            symbol = trade_identifier[0] # Get ticker from identifier
+            symbol = trade_identifier[0]
 
             # Use original share_size from DB, apply multiplier
             original_quantity = row['share_size']
@@ -199,32 +196,31 @@ def export_pnl_to_csv(
             entry_dt = row['entry_timestamp']
             exit_dt = row['exit_timestamp']
 
-            if pd.isna(entry_dt) or pd.isna(exit_dt): continue
+            if pd.isna(entry_dt) or pd.isna(exit_dt): 
+                continue
 
-            # Add legs with trade_id (original index), leg_type, and identifier
+            # Add legs with trade_id, leg_type, and identifier
             if row['pos_long'] == 1:
-                # Entry Leg (Buy) - Use ENTRY BID price for CSV
+                # Long position: Entry Buy, Exit Sell
                 all_trade_legs.append({'datetime': entry_dt, 'date': entry_date, 'time': entry_time, 'symbol': symbol, 'quantity': quantity, 'price': f"{entry_bid:.2f}", 'side': "Buy", 'trade_id': idx, 'leg_type': 'entry', 'identifier': trade_identifier})
-                # Exit Leg (Sell) - Use EXIT ASK price for CSV
                 all_trade_legs.append({'datetime': exit_dt, 'date': exit_date, 'time': exit_time, 'symbol': symbol, 'quantity': quantity, 'price': f"{exit_ask:.2f}", 'side': "Sell", 'trade_id': idx, 'leg_type': 'exit', 'identifier': trade_identifier})
             elif row['pos_short'] == 1:
-                # Entry Leg (Sell) - Use ENTRY ASK price for CSV
+                # Short position: Entry Sell, Exit Buy  
                 all_trade_legs.append({'datetime': entry_dt, 'date': entry_date, 'time': entry_time, 'symbol': symbol, 'quantity': quantity, 'price': f"{entry_ask:.2f}", 'side': "Sell", 'trade_id': idx, 'leg_type': 'entry', 'identifier': trade_identifier})
-                # Exit Leg (Buy) - Use EXIT BID price for CSV
                 all_trade_legs.append({'datetime': exit_dt, 'date': exit_date, 'time': exit_time, 'symbol': symbol, 'quantity': quantity, 'price': f"{exit_bid:.2f}", 'side': "Buy", 'trade_id': idx, 'leg_type': 'exit', 'identifier': trade_identifier})
 
-        print(f"Generated {len(all_trade_legs)} potential trade legs.")
+        logger.info(f"Generated {len(all_trade_legs):,} potential trade legs.")
 
         # 5.5 Apply Time Filter (if enabled)
         if use_time_filter:
-            print("Applying market hours filter based on ENTRY time (9:30:00 to 16:00:00 US/Eastern Time, DST aware)...")
+            logger.info("Applying market hours filter based on ENTRY time (9:30:00 to 16:00:00 US/Eastern Time, DST aware)...")
             valid_trade_ids_time = set()
             try:
                 eastern_tz = ZoneInfo("America/New_York")
                 market_open_time = time(9, 30, 0)
                 market_close_time = time(16, 0, 0)
             except Exception as tz_err:
-                print(f"  - ERROR initializing timezone or times: {tz_err}. Skipping time filter.")
+                logger.error(f"  - ERROR initializing timezone or times: {tz_err}. Skipping time filter.")
                 valid_trade_ids_time = {leg['trade_id'] for leg in all_trade_legs}
             else:
                 for leg in all_trade_legs:
@@ -244,17 +240,17 @@ def export_pnl_to_csv(
                 original_leg_count = len(all_trade_legs)
                 filtered_legs_time = [leg for leg in all_trade_legs if leg['trade_id'] in valid_trade_ids_time]
                 all_trade_legs = filtered_legs_time
-                print(f"Finished Python market hours filtering. Kept {len(all_trade_legs)} legs from {len(valid_trade_ids_time)} trades (originally {original_leg_count} legs).")
+                logger.info(f"Finished Python market hours filtering. Kept {len(all_trade_legs)} legs from {len(valid_trade_ids_time)} trades (originally {original_leg_count} legs).")
 
         # 6. Sort all trade legs chronologically
-        print("Sorting all trade legs chronologically...")
+        logger.info("Sorting all trade legs chronologically...")
         all_trade_legs.sort(key=lambda x: (x['datetime'], x['leg_type'] == 'exit'))
-        print("Sorting complete.")
+        logger.info("Sorting complete.")
 
         # 7. Apply Max Concurrent Positions Filter (if enabled)
         final_output_rows = [CSV_HEADER]
         if max_concurrent_positions is not None:
-            print(f"Applying max concurrent positions limit ({max_concurrent_positions})...")
+            logger.info(f"Applying max concurrent positions limit ({max_concurrent_positions})...")
             open_positions = defaultdict(int)
             included_trade_ids_concurrency = set()
             final_filtered_legs = []
@@ -283,18 +279,18 @@ def export_pnl_to_csv(
 
             for leg in final_filtered_legs:
                  final_output_rows.append([leg['date'], leg['time'], leg['symbol'], leg['quantity'], leg['price'], leg['side']])
-            print(f"Finished applying concurrency limit. {len(final_output_rows) - 1} trade legs remain.")
+            logger.info(f"Finished applying concurrency limit. {len(final_output_rows) - 1} trade legs remain.")
 
         else:
             # If no concurrency limit, format all sorted legs and collect identifiers
-            print("No concurrency limit applied. Formatting all legs...")
+            logger.info("No concurrency limit applied. Formatting all legs...")
             trade_ids_in_output = set()
             for leg in all_trade_legs:
                 final_output_rows.append([leg['date'], leg['time'], leg['symbol'], leg['quantity'], leg['price'], leg['side']])
                 if leg['trade_id'] not in trade_ids_in_output:
                     exported_trade_identifiers.add(leg['identifier']) # identifier = (ticker, label_timestamp)
                     trade_ids_in_output.add(leg['trade_id'])
-            print(f"Formatted {len(final_output_rows) - 1} trade legs.")
+            logger.info(f"Formatted {len(final_output_rows) - 1} trade legs.")
 
         # 8. Write the final data to partitioned CSV files
         MAX_ROWS_PER_FILE = 100000
@@ -303,7 +299,7 @@ def export_pnl_to_csv(
 
         if num_data_rows > 0:
             num_files = (num_data_rows + (MAX_ROWS_PER_FILE - 1) - 1) // (MAX_ROWS_PER_FILE - 1)
-            print(f"Total data rows: {num_data_rows}. Splitting into {num_files} file(s) with max {MAX_ROWS_PER_FILE} rows each...")
+            logger.info(f"Total data rows: {num_data_rows}. Splitting into {num_files} file(s) with max {MAX_ROWS_PER_FILE} rows each...")
 
             rows_written_total = 0
             for i in range(num_files):

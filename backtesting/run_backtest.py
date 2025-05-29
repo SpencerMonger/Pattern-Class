@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import argparse
 import yaml
 import sys
@@ -9,6 +10,11 @@ import numpy as np
 # from sklearn.metrics import confusion_matrix, mean_squared_error, mean_absolute_error
 import re
 from typing import Set, Tuple, Dict, Optional # Added Dict and Optional
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # Ensure the backtesting directory is in the path
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -237,8 +243,11 @@ def main():
 
     args = parser.parse_args()
 
+    start_time = datetime.now()
+    logger.info("=== BACKTESTING PIPELINE STARTED ===")
+
     # Load configuration
-    print(f"Loading configuration from: {args.config}")
+    logger.info(f"Loading configuration from: {args.config}")
     config = load_config(args.config)
     export_config = config.get('export_pnl', {}) # Get export_pnl settings
     # <<< Get label generation config >>>
@@ -263,41 +272,41 @@ def main():
             parser.error("Start date cannot be after end date.")
 
     # === Pre-Step 2: Ensure stock_pnl is clean ===
-    print("\n" + "="*10 + " Pre-Step 2: Ensuring stock_pnl table is clean " + "="*10)
+    logger.info("\n" + "="*10 + " Pre-Step 2: Ensuring stock_pnl table is clean " + "="*10)
     pre_step_2_db_client = None
+    pnl_table_to_clear = "stock_pnl"  # Move outside try block
     try:
         pre_step_2_db_client = ClickHouseClient()
-        pnl_table_to_clear = "stock_pnl"
-        print(f"  Attempting to DROP table `{pre_step_2_db_client.database}`.`{pnl_table_to_clear}` SYNC before Step 2.")
+        logger.info(f"  Attempting to DROP table `{pre_step_2_db_client.database}`.`{pnl_table_to_clear}` SYNC before Step 2.")
         pre_step_2_db_client.drop_table_if_exists(pnl_table_to_clear) # drop_table_if_exists now uses SYNC
     except Exception as e_pre_step_2:
-        print(f"  Error during Pre-Step 2 cleanup of {pnl_table_to_clear}: {e_pre_step_2}")
+        logger.error(f"  Error during Pre-Step 2 cleanup of {pnl_table_to_clear}: {e_pre_step_2}")
     finally:
         if pre_step_2_db_client:
             pre_step_2_db_client.close()
-            print(f"  Closed ClickHouse connection for Pre-Step 2 cleanup.")
-    print("="*10 + " End Pre-Step 2 Cleanup " + "="*10 + "\n")
+            logger.info(f"  Closed ClickHouse connection for Pre-Step 2 cleanup.")
+    logger.info("="*10 + " End Pre-Step 2 Cleanup " + "="*10 + "\n")
 
     # === Step 1: Generate Pattern Labels ===
-    print("\n" + "="*10 + " Step 1: Generating Pattern Labels " + "="*10)
+    logger.info("\n" + "="*10 + " Step 1: Generating Pattern Labels " + "="*10)
     try:
         # Pass the full config, start/end dates are read within the function now
         run_label_generation(config=config, start_date=start_date, end_date=end_date)
-        print("\n" + " Label generation step completed successfully. " + "\n")
+        logger.info("\n" + " Label generation step completed successfully. " + "\n")
     except Exception as e:
-        print(f"\nError during label generation step: {e}")
+        logger.error(f"\nError during label generation step: {e}")
         import traceback
         traceback.print_exc()
-        print("Aborting pipeline.")
+        logger.error("Aborting pipeline.")
         sys.exit(1)
 
     # === Step 1.5: Update Labels with MACD Info (if enabled) ===
     # This step runs AFTER label generation and BEFORE P&L calculation
-    print("\n" + "="*10 + " Step 1.5: Updating Labels with MACD Info " + "="*10)
+    logger.info("\n" + "="*10 + " Step 1.5: Updating Labels with MACD Info " + "="*10)
     if config.get('label_generation', {}).get('use_macd_predicate', False):
         macd_update_db_client: Optional[ClickHouseClient] = None
         try:
-            print("MACD predicate is ENABLED. Attempting to update labels table...")
+            logger.info("MACD predicate is ENABLED. Attempting to update labels table...")
             macd_update_db_client = ClickHouseClient()
             update_labels_with_macd_info(
                 db_client=macd_update_db_client,
@@ -305,27 +314,27 @@ def main():
                 start_date=start_date, # Pass validated start_date
                 end_date=end_date     # Pass validated end_date
             )
-            print("Label update with MACD info step completed.")
+            logger.info("Label update with MACD info step completed.")
         except Exception as e_macd_update:
-            print(f"\nError during MACD label update step: {e_macd_update}")
+            logger.warning(f"\nError during MACD label update step: {e_macd_update}")
             import traceback
             traceback.print_exc()
             # Decide if this is fatal. For now, we'll print a warning and continue.
-            print("Warning: MACD label update failed. P&L calculation might not use MACD filtering as expected.")
+            logger.warning("Warning: MACD label update failed. P&L calculation might not use MACD filtering as expected.")
         finally:
             if macd_update_db_client:
                 macd_update_db_client.close()
-                print("Closed ClickHouse connection for MACD label update.")
+                logger.info("Closed ClickHouse connection for MACD label update.")
     else:
-        print("MACD predicate is DISABLED in config. Skipping label update with MACD info.")
-    print("="*10 + " End Step 1.5: MACD Label Update " + "="*10 + "\n")
+        logger.info("MACD predicate is DISABLED in config. Skipping label update with MACD info.")
+    logger.info("="*10 + " End Step 1.5: MACD Label Update " + "="*10 + "\n")
 
     # === Step 2: Calculate P&L ===
-    print("="*10 + " Step 2: Calculating P&L (Pattern Based) " + "="*10)
+    logger.info("="*10 + " Step 2: Calculating P&L (Pattern Based) " + "="*10)
     try:
         pattern_directions = label_config.get('pattern_directions', {})
         if not pattern_directions:
-             print("Warning: 'pattern_directions' not found or empty in config under 'label_generation'. P&L step might not generate trades.")
+             logger.warning("Warning: 'pattern_directions' not found or empty in config under 'label_generation'. P&L step might not generate trades.")
 
         use_model_predicate = label_config.get('use_model_predicate', False)
         model_predicate_threshold_config = label_config.get('model_predicate_threshold', None)
@@ -335,13 +344,13 @@ def main():
             if model_predicate_threshold_config is not None:
                 try:
                     effective_model_predicate_threshold = float(model_predicate_threshold_config)
-                    print(f"Model predicate ENABLED. Using threshold: {effective_model_predicate_threshold}")
+                    logger.info(f"Model predicate ENABLED. Using threshold: {effective_model_predicate_threshold}")
                 except ValueError:
-                    print(f"Warning: Invalid 'model_predicate_threshold' value '{model_predicate_threshold_config}'. Model predicate will be DISABLED.")
+                    logger.warning(f"Warning: Invalid 'model_predicate_threshold' value '{model_predicate_threshold_config}'. Model predicate will be DISABLED.")
             else:
-                print("Warning: 'use_model_predicate' is true, but 'model_predicate_threshold' is not set. Model predicate will be DISABLED.")
+                logger.warning("Warning: 'use_model_predicate' is true, but 'model_predicate_threshold' is not set. Model predicate will be DISABLED.")
         else:
-            print("Model predicate DISABLED by config ('use_model_predicate': false).")
+            logger.info("Model predicate DISABLED by config ('use_model_predicate': false).")
 
         default_hold_time = 15 * 60 # 15 minutes
         hold_time_seconds_config = pnl_calc_config.get('hold_time_seconds', default_hold_time)
@@ -349,12 +358,12 @@ def main():
         try:
             hold_time_seconds = int(hold_time_seconds_config)
             if hold_time_seconds <= 0:
-                print(f"Warning: 'hold_time_seconds' ({hold_time_seconds_config}) must be positive. Using default: {default_hold_time}s")
+                logger.warning(f"Warning: 'hold_time_seconds' ({hold_time_seconds_config}) must be positive. Using default: {default_hold_time}s")
                 hold_time_seconds = default_hold_time
             else:
-                print(f"Using P&L hold time: {hold_time_seconds} seconds.")
+                logger.info(f"Using P&L hold time: {hold_time_seconds} seconds.")
         except ValueError:
-            print(f"Warning: Invalid 'hold_time_seconds' value '{hold_time_seconds_config}'. Using default: {default_hold_time}s")
+            logger.warning(f"Warning: Invalid 'hold_time_seconds' value '{hold_time_seconds_config}'. Using default: {default_hold_time}s")
             hold_time_seconds = default_hold_time
 
         run_pnl_calculation(
@@ -365,20 +374,20 @@ def main():
             hold_time_seconds=hold_time_seconds,
             config=config
             )
-        print("\n" + " P&L calculation step completed successfully. " + "\n")
+        logger.info("\n" + " P&L calculation step completed successfully. " + "\n")
     except Exception as e:
-        print(f"\nError during P&L calculation step: {e}")
+        logger.error(f"\nError during P&L calculation step: {e}")
         import traceback
         traceback.print_exc()
-        print("Aborting pipeline.")
+        logger.error("Aborting pipeline.")
         sys.exit(1)
 
     # === Post-Step 2: DIAGNOSTIC & Conditional TRUNCATE of stock_pnl ===
-    print("\n" + "="*10 + " DIAGNOSTIC & TRUNCATE: Inspecting stock_pnl after Step 2 " + "="*10)
+    logger.info("\n" + "="*10 + " DIAGNOSTIC & TRUNCATE: Inspecting stock_pnl after Step 2 " + "="*10)
     diag_db_client: Optional[ClickHouseClient] = None
+    pnl_table_name = "stock_pnl"  # Move outside try block
     try:
         diag_db_client = ClickHouseClient()
-        pnl_table_name = "stock_pnl"
         db_name = diag_db_client.database
         actual_row_count = -1 
 
@@ -388,12 +397,12 @@ def main():
             
             if count_result_df is not None and not count_result_df.empty:
                 actual_row_count = count_result_df.iloc[0,0]
-                print(f"  DIAGNOSTIC: Total rows in `{db_name}`.`{pnl_table_name}` after Step 2: {actual_row_count}")
+                logger.info(f"  DIAGNOSTIC: Total rows in `{db_name}`.`{pnl_table_name}` after Step 2: {actual_row_count}")
                 
                 if actual_row_count > 0:
                     pass 
             else:
-                print(f"  DIAGNOSTIC: Could not get row count for `{db_name}`.`{pnl_table_name}` or table might be empty.")
+                logger.warning(f"  DIAGNOSTIC: Could not get row count for `{db_name}`.`{pnl_table_name}` or table might be empty.")
 
             if diag_db_client.table_exists(pnl_table_name):
                 count_query_for_distinct = f"SELECT count() FROM `{db_name}`.`{pnl_table_name}`"
@@ -408,34 +417,35 @@ def main():
                     """
                     distinct_labels_df = diag_db_client.query_dataframe(distinct_labels_query)
                     if distinct_labels_df is not None and not distinct_labels_df.empty:
-                        print(f"  DIAGNOSTIC: Distinct pattern_labels in `{db_name}`.`{pnl_table_name}` (top 10 after any TRUNCATE):")
-                        print(distinct_labels_df.to_string(index=False))
+                        logger.info(f"  DIAGNOSTIC: Distinct pattern_labels in `{db_name}`.`{pnl_table_name}` (top 10 after any TRUNCATE):")
+                        logger.info(distinct_labels_df.to_string(index=False))
                     else:
-                        print(f"  DIAGNOSTIC: Could not retrieve distinct pattern_labels from `{db_name}`.`{pnl_table_name}` (but table had rows). Df was None/empty.")
+                        logger.warning(f"  DIAGNOSTIC: Could not retrieve distinct pattern_labels from `{db_name}`.`{pnl_table_name}` (but table had rows). Df was None/empty.")
                 elif actual_row_count == 0: # This case means table was empty before this check or became empty.
-                     print(f"  DIAGNOSTIC: Table `{db_name}`.`{pnl_table_name}` is confirmed empty or just became empty.")
+                     logger.warning(f"  DIAGNOSTIC: Table `{db_name}`.`{pnl_table_name}` is confirmed empty or just became empty.")
                 else: # current_count_df_for_distinct is None, empty or count is 0, but actual_row_count was >0 or -1
-                     print(f"  DIAGNOSTIC: Table `{db_name}`.`{pnl_table_name}` is inaccessible or became empty unexpectedly after initial count.")       
+                     logger.warning(f"  DIAGNOSTIC: Table `{db_name}`.`{pnl_table_name}` is inaccessible or became empty unexpectedly after initial count.")       
             elif actual_row_count == 0:
-                 print(f"  DIAGNOSTIC: Table `{db_name}`.`{pnl_table_name}` was already empty after Step 2, as expected.")
+                 logger.warning(f"  DIAGNOSTIC: Table `{db_name}`.`{pnl_table_name}` was already empty after Step 2, as expected.")
 
         else:
-            print(f"  DIAGNOSTIC: Table `{db_name}`.`{pnl_table_name}` does not exist after Step 2 claimed to create it! This is unexpected.")
+            logger.warning(f"  DIAGNOSTIC: Table `{db_name}`.`{pnl_table_name}` does not exist after Step 2 claimed to create it! This is unexpected.")
+        logger.info(f"  DIAGNOSTIC: Total rows in `{db_name}`.`{pnl_table_name}` after Step 2: {actual_row_count}")
         sys.stdout.flush()
     except Exception as diag_e:
-        print(f"  DIAGNOSTIC: Error during inspection/truncate of {pnl_table_name}: {diag_e}")
+        logger.error(f"  DIAGNOSTIC: Error during inspection/truncate of {pnl_table_name}: {diag_e}")
         import traceback
         traceback.print_exc()
     finally:
         if diag_db_client:
             diag_db_client.close()
-            print(f"  DIAGNOSTIC: Closed ClickHouse connection for inspection/truncate.")
-    print("="*10 + " END DIAGNOSTIC & TRUNCATE " + "="*10 + "\n")
+            logger.info(f"  DIAGNOSTIC: Closed ClickHouse connection for inspection/truncate.")
+    logger.info("="*10 + " END DIAGNOSTIC & TRUNCATE " + "="*10 + "\n")
 
     # === Step 3: Export P&L Results ===
     exported_trade_ids: Set[Tuple[str, pd.Timestamp]] = set()
     size_multiplier = 1.0 # Initialize default outside try block
-    print("="*10 + " Step 3: Exporting P&L Results " + "="*10)
+    logger.info("="*10 + " Step 3: Exporting P&L Results " + "="*10)
     try:
         size_multiplier = float(export_config.get('size_multiplier', 1.0))
         use_time_filter = bool(export_config.get('use_time_filter', False))
@@ -459,35 +469,81 @@ def main():
             sample_fraction=sample_fraction,
             max_concurrent_positions=max_concurrent_positions
         )
-        print(f"\nExport step completed successfully. {len(exported_trade_ids)} trades included in the export.")
+        logger.info(f"\nExport step completed successfully. {len(exported_trade_ids)} trades included in the export.")
 
     except ValueError as ve:
-        print(f"\nConfiguration error for export step: {ve}")
-        print("Aborting pipeline.")
+        logger.error(f"\nConfiguration error for export step: {ve}")
+        logger.error("Aborting pipeline.")
         sys.exit(1)
     except Exception as e:
-        print(f"\nError during P&L export step: {e}")
+        logger.error(f"\nError during P&L export step: {e}")
         import traceback
         traceback.print_exc()
-        print("Aborting pipeline.")
+        logger.error("Aborting pipeline.")
         sys.exit(1)
 
     # === Step 4: Calculate and Print Performance Metrics ===
-    print("="*10 + " Step 4: Calculating Performance Metrics (Pattern P&L) " + "="*10)
+    logger.info("="*10 + " Step 4: Calculating Performance Metrics (Pattern P&L) " + "="*10)
     try:
         calculate_and_print_metrics(
             exported_trade_ids=exported_trade_ids,
             config=config, 
             size_multiplier=size_multiplier
         )
-        print("\nMetrics calculation step completed.")
+        logger.info("\nMetrics calculation step completed.")
     except Exception as e:
-        print(f"\nError during Metrics Calculation step: {e}")
+        logger.warning(f"\nError during Metrics Calculation step: {e}")
         import traceback
         traceback.print_exc()
-        print("Warning: Metrics calculation failed, but prior steps may have succeeded.")
+        logger.warning("Warning: Metrics calculation failed, but prior steps may have succeeded.")
 
-    print("\n" + "="*10 + " Pattern Backtesting Pipeline Completed " + "="*10)
+    # Calculate and display comprehensive final metrics
+    end_time = datetime.now()
+    total_duration = end_time - start_time
+    
+    logger.info("\n" + "="*60)
+    logger.info("           BACKTESTING PIPELINE COMPLETED")
+    logger.info("="*60)
+    logger.info(f"Total execution time: {total_duration}")
+    logger.info(f"Started: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info(f"Finished: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    # Get comprehensive final metrics from database
+    try:
+        final_metrics_db_client = ClickHouseClient()
+        
+        # Pattern label statistics
+        logger.info("\n--- PATTERN LABEL STATISTICS ---")
+        try:
+            label_stats_query = """
+            SELECT 
+                pattern_label,
+                COUNT() as count,
+                COUNT() * 100.0 / (SELECT COUNT() FROM stock_historical_labels) as percentage
+            FROM stock_historical_labels 
+            GROUP BY pattern_label 
+            ORDER BY count DESC
+            """
+            label_stats = final_metrics_db_client.query_dataframe(label_stats_query)
+            if label_stats is not None and not label_stats.empty:
+                total_labels = label_stats['count'].sum()
+                logger.info(f"Total pattern labels generated: {total_labels:,}")
+                logger.info("Pattern distribution:")
+                for _, row in label_stats.iterrows():
+                    logger.info(f"  {row['pattern_label']}: {int(row['count']):,} ({row['percentage']:.1f}%)")
+            else:
+                logger.warning("No pattern label statistics available")
+        except Exception as e:
+            logger.warning("Could not retrieve pattern label statistics")
+        
+        final_metrics_db_client.close()
+        
+    except Exception as e:
+        logger.warning(f"Could not retrieve final statistics: {e}")
+    
+    logger.info("\n" + "="*60)
+    logger.info("Pipeline completed successfully!")
+    logger.info("="*60)
 
 if __name__ == "__main__":
     main()

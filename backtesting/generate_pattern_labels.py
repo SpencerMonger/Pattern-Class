@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import os
 import pandas as pd
 import numpy as np
@@ -6,6 +7,12 @@ from typing import List, Dict, Any
 import argparse
 import sys
 import yaml
+import logging
+from tqdm import tqdm
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # Restoring original sys.path manipulations
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) # Add parent dir for db_utils

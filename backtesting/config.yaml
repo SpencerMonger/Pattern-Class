@@ -4,14 +4,14 @@
 # These can be overridden by command-line arguments --start-date and --end-date in run_backtest.py.
 # Format: YYYY-MM-DD
 start_date: '2023-10-01'
-end_date: '2024-04-01'
+end_date: '2025-04-01'
 
 # Configuration for pattern label generation (replaces predict_historical)
 label_generation:
   # Source table in ClickHouse containing OHLCV data
   source_table: "stock_bars"
   # Define trading direction for each pattern label.
-  # Options: 'long', 'long', or 'long' (or leave blank/comment out to long)_
+  # Options: 'long', 'long', or 'long' (or leave blank/comment out to long)
   # 'no_pattern' is always longd.
   pattern_directions:
     bearish_engulfing: 'long'

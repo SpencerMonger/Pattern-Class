@@ -1,13 +1,19 @@
 import os
+import sys
 import datetime as dt_module
 from datetime import timedelta, datetime
 import pandas as pd
 import argparse
+import logging
 from typing import Dict, Optional
 import yaml # Added missing import for standalone execution
 
 # Assuming db_utils is in the same directory
 from db_utils import ClickHouseClient # Reverted to direct import
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # --- Configuration ---
 # Database table names
@@ -73,15 +79,15 @@ def run_pnl_calculation(
         if hold_time_seconds is not None:
             if isinstance(hold_time_seconds, int) and hold_time_seconds > 0:
                 effective_hold_time_seconds = hold_time_seconds
-                print(f"Using configured hold time: {effective_hold_time_seconds} seconds.")
+                logger.info(f"Using configured hold time: {effective_hold_time_seconds} seconds.")
             else:
-                print(f"Warning: Invalid hold_time_seconds value ('{hold_time_seconds}') received. Using default: {default_hold_seconds}s")
+                logger.warning(f"Invalid hold_time_seconds value ('{hold_time_seconds}') received. Using default: {default_hold_seconds}s")
         else:
-            print(f"No hold_time_seconds provided. Using default: {default_hold_seconds}s")
+            logger.info(f"No hold_time_seconds provided. Using default: {default_hold_seconds}s")
         
         # Calculate exit_offset based on entry_offset and effective_hold_time
         calculated_exit_offset_seconds = ENTRY_OFFSET_SECONDS + effective_hold_time_seconds
-        print(f"Entry offset: {ENTRY_OFFSET_SECONDS}s, Exit offset: {calculated_exit_offset_seconds}s (Hold: {effective_hold_time_seconds}s)")
+        logger.info(f"Entry offset: {ENTRY_OFFSET_SECONDS}s, Exit offset: {calculated_exit_offset_seconds}s (Hold: {effective_hold_time_seconds}s)")
 
         # 1. Initialize Database Connection
         db_client = ClickHouseClient()
@@ -89,42 +95,46 @@ def run_pnl_calculation(
 
         # --- Validate pattern_directions --- #
         if not pattern_directions or not isinstance(pattern_directions, dict):
-            print("Error: Invalid or missing 'pattern_directions' dictionary. Cannot determine trades.")
+            logger.error("Invalid or missing 'pattern_directions' dictionary. Cannot determine trades.")
             return
         # Create sets for quick lookup, converting labels to lowercase for robustness
         long_patterns = {label.lower() for label, direction in pattern_directions.items() if direction.lower() == 'long'}
         short_patterns = {label.lower() for label, direction in pattern_directions.items() if direction.lower() == 'short'}
-        print(f"Configured LONG patterns: {long_patterns if long_patterns else 'None'}")
-        print(f"Configured SHORT patterns: {short_patterns if short_patterns else 'None'}")
+        ignored_patterns = {label.lower() for label, direction in pattern_directions.items() if direction.lower() == 'ignore'}
+        
+        logger.info(f"Pattern configuration summary:")
+        logger.info(f"  LONG patterns ({len(long_patterns)}): {sorted(long_patterns) if long_patterns else 'None'}")
+        logger.info(f"  SHORT patterns ({len(short_patterns)}): {sorted(short_patterns) if short_patterns else 'None'}")
+        logger.info(f"  IGNORED patterns ({len(ignored_patterns)}): {sorted(ignored_patterns) if ignored_patterns else 'None'}")
+        
         if not long_patterns and not short_patterns:
-            print("Warning: No patterns configured for LONG or SHORT trades in pattern_directions.")
-            # Proceed, but likely no PNL rows will be generated.
+            logger.warning("No patterns configured for LONG or SHORT trades in pattern_directions.")
 
         # Check if source tables exist
         if not db_client.table_exists(LABELS_TABLE):
-            print(f"Error: Labels table '{LABELS_TABLE}' not found. Please run generate_pattern_labels.py first.")
+            logger.error(f"Labels table '{LABELS_TABLE}' not found. Please run generate_pattern_labels.py first.")
             return
         if not db_client.table_exists(QUOTES_TABLE):
-            print(f"Error: Quotes table '{QUOTES_TABLE}' not found. Ensure quote data is available.")
+            logger.error(f"Quotes table '{QUOTES_TABLE}' not found. Ensure quote data is available.")
             return
 
         # --- Handle Model Predicate Threshold ---
         effective_model_predicate_threshold = None
         if model_predicate_threshold is not None:
             if not db_client.table_exists(PREDICTIONS_TABLE):
-                print(f"Warning: Model predicate threshold is {model_predicate_threshold}, but predictions table '{PREDICTIONS_TABLE}' not found. Predicate will be IGNORED.")
+                logger.warning(f"Model predicate threshold is {model_predicate_threshold}, but predictions table '{PREDICTIONS_TABLE}' not found. Predicate will be IGNORED.")
             else:
-                print(f"Using model predicate: prediction_raw >= {model_predicate_threshold} from table '{PREDICTIONS_TABLE}'")
+                logger.info(f"Model predicate ENABLED: prediction_raw >= {model_predicate_threshold} from table '{PREDICTIONS_TABLE}'")
                 effective_model_predicate_threshold = model_predicate_threshold
         else:
-            print("No model predicate threshold provided or it's invalid.")
+            logger.info("Model predicate DISABLED: No threshold provided.")
 
         # 2. Get list of distinct tickers to process from the LABELS table
-        print(f"Fetching distinct tickers from {LABELS_TABLE}...")
+        logger.info(f"Fetching distinct tickers from {LABELS_TABLE}...")
         # Filter tickers based on labels that actually trigger trades
         tradable_labels = list(long_patterns.union(short_patterns))
         if not tradable_labels:
-            print("No patterns configured for trading. No tickers to process.")
+            logger.warning("No patterns configured for trading. No tickers to process.")
             return
         # Format labels for SQL IN clause
         tradable_labels_sql = ", ".join([f"'{label}'" for label in tradable_labels])
@@ -132,15 +142,15 @@ def run_pnl_calculation(
 
         ticker_df = db_client.query_dataframe(ticker_query)
         if ticker_df is None or ticker_df.empty:
-            print(f"No tickers found with tradable patterns in {LABELS_TABLE}. Nothing to process.")
+            logger.warning(f"No tickers found with tradable patterns in {LABELS_TABLE}. Nothing to process.")
             return
         tickers_to_process = ticker_df['ticker'].tolist()
-        print(f"Found {len(tickers_to_process)} tickers with tradable patterns to process.")
+        logger.info(f"Found {len(tickers_to_process)} tickers with tradable patterns to process.")
 
         # 3. Drop and Recreate the PnL Table
-        print(f"Dropping existing PnL table '{PNL_TABLE}' (if it exists)...")
+        logger.info(f"Dropping existing PnL table '{PNL_TABLE}' (if it exists)...")
         db_client.drop_table_if_exists(PNL_TABLE)
-        print(f"Creating empty PnL table '{PNL_TABLE}' with new schema...")
+        logger.info(f"Creating empty PnL table '{PNL_TABLE}' with new schema...")
         create_table_query = f"""
         CREATE TABLE `{db_name}`.`{PNL_TABLE}` (
             {', '.join([f'`{col}` {dtype}' for col, dtype in PNL_SCHEMA.items()])}
@@ -150,9 +160,9 @@ def run_pnl_calculation(
         """
         create_result = db_client.execute(create_table_query)
         if not create_result and not db_client.table_exists(PNL_TABLE):
-            print(f"Failed to create table '{PNL_TABLE}'. Aborting.")
+            logger.error(f"Failed to create table '{PNL_TABLE}'. Aborting.")
             return
-        print(f"Successfully created or confirmed table '{PNL_TABLE}'.")
+        logger.info(f"Successfully created or confirmed table '{PNL_TABLE}'.")
 
         # 4. Process P&L Calculation and Insertion in Batches
         total_rows_inserted_overall = 0
@@ -169,10 +179,10 @@ def run_pnl_calculation(
         label_where_clauses.append(f"lower(pattern_label) IN ({tradable_labels_sql})")
 
         label_date_filter = " AND ".join(label_where_clauses)
-        print(f"Applying label filter: {label_date_filter}")
+        logger.info(f"Applying label filter: {label_date_filter}")
 
         for i, ticker in enumerate(tickers_to_process):
-            print(f"\n--- Processing ticker {i+1}/{len(tickers_to_process)}: {ticker} ---")
+            logger.info(f"\n--- Processing ticker {i+1}/{len(tickers_to_process)}: {ticker} ---")
             start_time_ticker = dt_module.datetime.now()
 
             # Get total labels count for this ticker for chunking (WITH DATE/PATTERN FILTER)
@@ -181,18 +191,18 @@ def run_pnl_calculation(
             count_result = db_client.execute(count_query, params={'ticker': ticker})
 
             if not count_result or not count_result.result_rows:
-                print(f"Could not get label count for ticker {ticker}. Skipping...")
+                logger.warning(f"Could not get label count for ticker {ticker}. Skipping...")
                 continue
             total_labels_for_ticker = count_result.result_rows[0][0]
             if total_labels_for_ticker == 0:
-                print(f"No tradable labels found for ticker {ticker} within date range. Skipping...")
+                logger.warning(f"No tradable labels found for ticker {ticker} within date range. Skipping...")
                 continue
-            print(f"Found {total_labels_for_ticker} tradable labels for {ticker}. Processing in chunks of {LABEL_CHUNK_SIZE}...")
+            logger.info(f"Found {total_labels_for_ticker} tradable labels for {ticker}. Processing in chunks of {LABEL_CHUNK_SIZE}...")
 
             # Inner loop for label chunks within the current ticker
             offset = 0
             while offset < total_labels_for_ticker:
-                print(f"  Processing chunk: offset {offset}, limit {LABEL_CHUNK_SIZE}")
+                logger.info(f"  Processing chunk: offset {offset}, limit {LABEL_CHUNK_SIZE}")
                 start_time_chunk = dt_module.datetime.now()
 
                 # --- Step 1: Fetch target times for the current chunk --- 
@@ -215,7 +225,7 @@ def run_pnl_calculation(
                 target_times_df = db_client.query_dataframe(target_times_query, params=params_chunk_range)
 
                 if target_times_df is None or target_times_df.empty or target_times_df.iloc[0]['min_entry_time'] is None:
-                    print(f"  Warning: Could not fetch valid time range for chunk (offset {offset}). Skipping chunk.")
+                    logger.warning(f"  Warning: Could not fetch valid time range for chunk (offset {offset}). Skipping chunk.")
                     offset += LABEL_CHUNK_SIZE
                     continue
 
@@ -225,7 +235,7 @@ def run_pnl_calculation(
                 # --- Step 2: Determine time range for filtering quotes --- 
                 quote_range_start = min_target_time - QUOTE_TIME_BUFFER
                 quote_range_end = max_target_time + QUOTE_TIME_BUFFER
-                print(f"    Quote Time Range Filter: {quote_range_start} to {quote_range_end}")
+                logger.info(f"    Quote Time Range Filter: {quote_range_start} to {quote_range_end}")
 
                 # --- Step 3: Construct and Execute INSERT query using ASOF JOIN --- #
                 quote_start_str = quote_range_start.strftime('%Y-%m-%d %H:%M:%S.%f')
@@ -248,7 +258,7 @@ def run_pnl_calculation(
                 if config and config.get('label_generation', {}).get('use_macd_predicate', False):
                     macd_predicate_condition_sql = f"AND lc.macd_allowed = 1"
                 else:
-                    print("MACD predicate is disabled in config or config not provided to P&L; MACD filter will not be applied in P&L query.")
+                    logger.info("MACD predicate is disabled in config or config not provided to P&L; MACD filter will not be applied in P&L query.")
 
                 insert_pnl_query = f"""
                 INSERT INTO `{db_name}`.`{PNL_TABLE}`
@@ -320,40 +330,103 @@ def run_pnl_calculation(
                     {macd_predicate_condition_sql} -- <<< Apply MACD predicate filter directly on lc.macd_allowed
                 """
 
+                # Add debug information about the INSERT query parameters and results
+                logger.info(f"    Target time range: {min_target_time} to {max_target_time}")
+                logger.info(f"    Label filter includes: {tradable_labels}")
+                if effective_model_predicate_threshold is not None:
+                    logger.info(f"    Model predicate threshold: >= {effective_model_predicate_threshold}")
+                else:
+                    logger.info(f"    Model predicate: DISABLED")
+
+                # --- Optional Debug: Count expected rows before insert ---
+                # NOTE: Debug query disabled due to memory issues with large table JOINs
+                logger.info(f"    Debug stats: Skipping detailed pre-insert statistics due to memory constraints with large tables")
+                
+                # try:
+                #     # Build the debug query with proper JOINs
+                #     debug_model_join = ""
+                #     debug_model_filter = ""
+                #     if effective_model_predicate_threshold is not None:
+                #         debug_model_join = f"""
+                #         LEFT JOIN `{db_name}`.`{PREDICTIONS_TABLE}` shp 
+                #             ON l.ticker = shp.ticker AND l.timestamp = shp.timestamp"""
+                #         debug_model_filter = f"AND shp.timestamp IS NOT NULL AND shp.prediction_raw >= {effective_model_predicate_threshold}"
+                #     
+                #     count_debug_query = f"""
+                #     SELECT 
+                #         COUNT() as total_rows,
+                #         COUNT(DISTINCT l.pattern_label) as distinct_patterns,
+                #         COUNT(CASE WHEN eh.bid_price IS NOT NULL THEN 1 END) as entry_quotes_found,
+                #         COUNT(CASE WHEN ex.ask_price IS NOT NULL THEN 1 END) as exit_quotes_found
+                #     FROM `{db_name}`.`{LABELS_TABLE}` l
+                #     LEFT JOIN `{db_name}`.`{QUOTES_TABLE}` eh 
+                #         ON eh.ticker = l.ticker 
+                #         AND eh.sip_timestamp = l.timestamp + INTERVAL {ENTRY_OFFSET_SECONDS} SECOND
+                #     LEFT JOIN `{db_name}`.`{QUOTES_TABLE}` ex 
+                #         ON ex.ticker = l.ticker 
+                #         AND ex.sip_timestamp = l.timestamp + INTERVAL {calculated_exit_offset_seconds} SECOND
+                #     {debug_model_join}
+                #     WHERE l.ticker = %(ticker)s
+                #         AND l.timestamp + INTERVAL {ENTRY_OFFSET_SECONDS} SECOND >= %(quote_range_start)s
+                #         AND l.timestamp + INTERVAL {calculated_exit_offset_seconds} SECOND <= %(quote_range_end)s
+                #         AND lower(l.pattern_label) IN ({tradable_labels_sql})
+                #         {debug_model_filter}
+                #         {macd_predicate_condition_sql}
+                #     """
+                #     debug_params = {
+                #         'ticker': ticker, 
+                #         'quote_range_start': quote_range_start,
+                #         'quote_range_end': quote_range_end
+                #     }
+                #     if effective_model_predicate_threshold is not None:
+                #         debug_params['model_threshold'] = effective_model_predicate_threshold
+                #     
+                #     debug_result = db_client.query_dataframe(count_debug_query, params=debug_params)
+                #     if debug_result is not None and not debug_result.empty:
+                #         debug_row = debug_result.iloc[0]
+                #         logger.info(f"    Pre-insert stats: {debug_row['total_rows']} total rows, "
+                #                   f"{debug_row['distinct_patterns']} patterns, "
+                #                   f"{debug_row['entry_quotes_found']}/{debug_row['total_rows']} entry quotes found "
+                #                   f"({100*debug_row['entry_quotes_found']/max(debug_row['total_rows'],1):.1f}%), "
+                #                   f"{debug_row['exit_quotes_found']}/{debug_row['total_rows']} exit quotes found "
+                #                   f"({100*debug_row['exit_quotes_found']/max(debug_row['total_rows'],1):.1f}%)")
+                # except Exception as debug_e:
+                #     logger.warning(f"    Debug query failed: {debug_e}")
+
                 # Execute the query
                 params = {'ticker': ticker, 'offset': offset}
-                print(f"  Executing calculation and insertion for {ticker} chunk (offset {offset})...")
+                logger.info(f"  Executing calculation and insertion for {ticker} chunk (offset {offset})...")
                 insert_result = db_client.execute(insert_pnl_query, params=params)
                 end_time_chunk = dt_module.datetime.now()
 
                 if insert_result:
-                    print(f"  Successfully processed chunk for {ticker} (offset {offset}). Time: {end_time_chunk - start_time_chunk}")
+                    logger.info(f"  Successfully processed chunk for {ticker} (offset {offset}). Time: {end_time_chunk - start_time_chunk}")
                 else:
-                    print(f"  Failed to process chunk for {ticker} (offset {offset}). Check query and logs. Skipping chunk...")
+                    logger.warning(f"  Failed to process chunk for {ticker} (offset {offset}). Check query and logs. Skipping chunk...")
 
                 offset += LABEL_CHUNK_SIZE
 
             end_time_ticker = dt_module.datetime.now()
-            print(f"--- Finished processing ticker {ticker}. Total Time: {end_time_ticker - start_time_ticker} --- ")
+            logger.info(f"--- Finished processing ticker {ticker}. Total Time: {end_time_ticker - start_time_ticker} --- ")
 
         end_time_all = dt_module.datetime.now()
-        print(f"\n--- Finished processing all tickers --- ")
-        print(f"Total batch processing time: {end_time_all - start_time_all}")
+        logger.info(f"\n--- Finished processing all tickers --- ")
+        logger.info(f"Total batch processing time: {end_time_all - start_time_all}")
 
         # Final count
         count_result = db_client.execute(f"SELECT count() FROM `{db_name}`.`{PNL_TABLE}`")
         if count_result and count_result.result_rows:
             total_rows_inserted_overall = count_result.result_rows[0][0]
-            print(f"Total rows inserted into '{PNL_TABLE}': {total_rows_inserted_overall}")
+            logger.info(f"Total rows inserted into '{PNL_TABLE}': {total_rows_inserted_overall}")
         else:
-            print(f"Could not retrieve final row count for '{PNL_TABLE}'.")
+            logger.warning(f"Could not retrieve final row count for '{PNL_TABLE}'.")
 
     except FileNotFoundError as e: # Should not happen if tables exist
-        print(f"Error: {e}.")
+        logger.error(f"Error: {e}.")
     except ValueError as e:
-        print(f"Configuration or data error: {e}")
+        logger.error(f"Configuration or data error: {e}")
     except Exception as e:
-        print(f"An unexpected error occurred during P&L calculation: {e}")
+        logger.error(f"An unexpected error occurred during P&L calculation: {e}")
         import traceback
         traceback.print_exc()
     finally:
@@ -373,21 +446,21 @@ if __name__ == "__main__":
     pattern_directions_map = {}
     try:
         # import yaml # No longer needed here, moved to top
-        print(f"Loading pattern directions from: {args.pattern_directions_yaml}")
+        logger.info(f"Loading pattern directions from: {args.pattern_directions_yaml}")
         with open(args.pattern_directions_yaml, 'r') as f:
             config_full = yaml.safe_load(f)
         if config_full and 'label_generation' in config_full and 'pattern_directions' in config_full['label_generation']:
             pattern_directions_map = config_full['label_generation']['pattern_directions']
         else:
-            print(f"Warning: Could not find 'label_generation.pattern_directions' in {args.pattern_directions_yaml}")
+            logger.warning(f"Warning: Could not find 'label_generation.pattern_directions' in {args.pattern_directions_yaml}")
     except FileNotFoundError:
-        print(f"Error: Config file '{args.pattern_directions_yaml}' not found.")
+        logger.error(f"Error: Config file '{args.pattern_directions_yaml}' not found.")
         sys.exit(1)
     except ImportError:
-        print("Error: PyYAML is required to load config for standalone run. Please install it.")
+        logger.error("Error: PyYAML is required to load config for standalone run. Please install it.")
         sys.exit(1)
     except yaml.YAMLError as e:
-        print(f"Error parsing config file '{args.pattern_directions_yaml}': {e}")
+        logger.error(f"Error parsing config file '{args.pattern_directions_yaml}': {e}")
         sys.exit(1)
 
     # Basic date validation
@@ -415,7 +488,7 @@ if __name__ == "__main__":
         except ValueError:
             parser.error("Invalid date format. Please use YYYY-MM-DD.")
 
-    print("=== Starting P&L Calculation (Pattern Based) ===")
+    logger.info("=== Starting P&L Calculation (Pattern Based) ===")
     run_pnl_calculation(
         pattern_directions=pattern_directions_map,
         start_date=args.start_date,
@@ -424,4 +497,4 @@ if __name__ == "__main__":
         hold_time_seconds=None,
         config=config_full if 'config_full' in locals() else {}
     )
-    print("===============================================")
+    logger.info("===============================================")

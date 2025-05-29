@@ -2,8 +2,13 @@ import pandas as pd
 import numpy as np
 import os
 import sys
+import logging
 from tqdm import tqdm
 from typing import Dict, List
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # --- Adjust sys.path --- #
 # Add project root directory (parent of 'backtesting' and 'ohlc_detection') to path
@@ -203,46 +208,48 @@ def generate_labels_from_db(db_client: ClickHouseClient, config: Dict, pattern_d
         raise ValueError("Configuration missing 'label_generation.source_table'")
 
     # 1. Load and Prepare Data from DB
-    # Returns df with unique (timestamp, ticker) index and OHLCV columns
+    logger.info(f"Loading OHLC data from table '{source_table}' for date range: {start_date} to {end_date}")
     ohlc_df = load_and_prepare_data_from_db(db_client, source_table, start_date, end_date)
     if ohlc_df.empty:
-        print("No OHLC data loaded, returning empty DataFrame.")
+        logger.warning("No OHLC data loaded, returning empty DataFrame.")
         return pd.DataFrame(columns=['ticker', 'pattern_label'])
+
+    logger.info(f"Loaded {len(ohlc_df)} OHLC records for {ohlc_df['ticker'].nunique()} tickers")
 
     # --- Filter patterns to detect based on pattern_directions ---
     active_patterns_to_detect = {
         name: func for name, func in PATTERNS_TO_DETECT.items()
         if pattern_directions.get(name, '').lower() != 'ignore'
     }
-    print(f"Original patterns: {len(PATTERNS_TO_DETECT)}, Active patterns after 'ignore' filter: {len(active_patterns_to_detect)}")
+    logger.info(f"Pattern filtering: {len(PATTERNS_TO_DETECT)} total patterns, {len(active_patterns_to_detect)} active (non-ignored)")
+    logger.info(f"Active patterns: {sorted(active_patterns_to_detect.keys())}")
+    
     if not active_patterns_to_detect:
-        print("No active patterns to detect after filtering 'ignore' directives. Returning OHLC data with 'no_pattern' labels.")
+        logger.warning("No active patterns to detect after filtering 'ignore' directives. Returning OHLC data with 'no_pattern' labels.")
         ohlc_df['pattern_label'] = 'no_pattern'
-        # Ensure 'ticker' column exists if we are to return here.
-        # load_and_prepare_data_from_db ensures 'ticker' is in ohlc_df if data is loaded.
-        # If ohlc_df was empty and returned early, this path isn't hit.
-        # If ohlc_df is not empty, it should have 'ticker'.
-        return ohlc_df[['ticker', 'pattern_label']].reset_index() # return timestamp, ticker, pattern_label
+        return ohlc_df[['ticker', 'pattern_label']].reset_index()
 
     # 2. Detect All Patterns
-    # Returns df with cols: timestamp, ticker, pattern_bool_cols...
-    # Index is RangeIndex here
+    logger.info("Starting pattern detection across all tickers...")
     pattern_results_with_ticker = detect_patterns_on_df(ohlc_df, active_patterns_to_detect)
     if pattern_results_with_ticker.empty:
-         print("No pattern results generated, returning empty DataFrame.")
+         logger.warning("No pattern results generated, returning empty DataFrame.")
          return pd.DataFrame(columns=['ticker', 'pattern_label'])
 
-    # 3. Assign Single Label per Row using idxmax
-    # Returns Series with labels, indexed by RangeIndex
+    logger.info(f"Pattern detection complete: {len(pattern_results_with_ticker)} pattern result rows generated")
+
+    # 3. Assign Single Label per Row using priority system
+    logger.info("Starting label assignment with priority system...")
     label_series = assign_single_label(pattern_results_with_ticker)
     if label_series.empty:
-         print("No labels assigned, returning empty DataFrame.")
+         logger.warning("No labels assigned, returning empty DataFrame.")
          ohlc_df['pattern_label'] = 'no_pattern'
+    
     # Assign the label series to the pattern results dataframe
     pattern_results_with_ticker['pattern_label'] = label_series
 
     # 4. Merge labels back into the original ohlc_df based on timestamp and ticker
-    # Keep the original ohlc_df index (timestamp)
+    logger.info("Merging pattern labels back into original OHLC data...")
     ohlc_with_labels = pd.merge(
         ohlc_df.reset_index(),
         pattern_results_with_ticker[['timestamp', 'ticker', 'pattern_label']],
@@ -256,8 +263,14 @@ def generate_labels_from_db(db_client: ClickHouseClient, config: Dict, pattern_d
     # Set the timestamp back as the index
     ohlc_with_labels.set_index('timestamp', inplace=True)
 
-    print(f"Generated labels for {len(ohlc_with_labels)} rows.")
-    # Return the original DataFrame enriched with the pattern_label column
+    logger.info(f"Label generation complete: {len(ohlc_with_labels)} rows with pattern labels")
+    logger.info("Final pattern distribution across all tickers:")
+    label_counts = ohlc_with_labels['pattern_label'].value_counts()
+    total_labels = len(ohlc_with_labels)
+    for pattern, count in label_counts.items():
+        percentage = 100 * count / total_labels
+        logger.info(f"  {pattern}: {count} ({percentage:.1f}%)")
+    
     return ohlc_with_labels
 
 def detect_patterns_on_df(ohlc_df: pd.DataFrame, patterns_to_run: Dict[str, callable]) -> pd.DataFrame:
@@ -426,46 +439,62 @@ def detect_patterns_on_df(ohlc_df: pd.DataFrame, patterns_to_run: Dict[str, call
     return final_results_df
 
 def assign_single_label(pattern_results_df: pd.DataFrame) -> pd.Series:
-    """Assigns a single label per row based on detected patterns (alphabetical priority).
-       Input DF expected index: RangeIndex. Columns: timestamp, ticker, pattern_bool_cols...
-       Returns pandas Series containing the assigned label, indexed by timestamp."""
+    """Assigns a single label per row based on detected patterns with priority system:
+    1. Patterns with 'star' in name (highest priority)
+    2. Patterns with 'doji' in name (medium priority)  
+    3. All other patterns (lowest priority)
+    Within each priority group, alphabetical order is used.
+    
+    Input DF expected index: RangeIndex. Columns: timestamp, ticker, pattern_bool_cols...
+    Returns pandas Series containing the assigned label, indexed by timestamp."""
 
     if pattern_results_df.empty:
-        print("Pattern results DataFrame is empty, cannot assign labels.")
+        logger.warning("Pattern results DataFrame is empty, cannot assign labels.")
         return pd.Series(dtype=str)
 
-    print("Assigning single label per row (using idxmax for first True)...")
+    logger.info("Assigning single label per row using priority system (star > doji > others)...")
 
     # Identify pattern boolean columns (exclude timestamp, ticker)
-    pattern_bool_columns = sorted([col for col in pattern_results_df.columns if col not in ['timestamp', 'ticker']])
+    pattern_bool_columns = [col for col in pattern_results_df.columns if col not in ['timestamp', 'ticker']]
 
     # Ensure boolean columns exist before proceeding
-    if not pattern_bool_columns: # No specific pattern columns mean no patterns were run/detected.
-        print("Warning: No pattern boolean columns found in results. Assigning 'no_pattern' to all.")
-        # If pattern_results_df is not empty but has no pattern columns (e.g., only timestamp, ticker),
-        # we need to create an index for the 'no_pattern' series that matches.
+    if not pattern_bool_columns:
+        logger.warning("No pattern boolean columns found in results. Assigning 'no_pattern' to all.")
         return pd.Series('no_pattern', index=pattern_results_df.index)
 
-    # Select only the boolean columns for idxmax
-    print(f"DEBUG assign_single_label: Columns for idxmax: {pattern_bool_columns}") # Debug print
-    bool_df = pattern_results_df[pattern_bool_columns]
+    # Sort patterns by priority: star patterns, then doji patterns, then others (alphabetical within each group)
+    def pattern_priority(pattern_name):
+        if 'star' in pattern_name.lower():
+            return (0, pattern_name)  # Highest priority
+        elif 'doji' in pattern_name.lower():
+            return (1, pattern_name)  # Medium priority
+        else:
+            return (2, pattern_name)  # Lowest priority
+    
+    pattern_bool_columns_sorted = sorted(pattern_bool_columns, key=pattern_priority)
+    
+    logger.info(f"Pattern priority order: {pattern_bool_columns_sorted}")
+
+    # Select only the boolean columns for pattern assignment
+    bool_df = pattern_results_df[pattern_bool_columns_sorted]
 
     has_pattern_mask = bool_df.any(axis=1)
 
     # Initialize label series
-    # Use the same RangeIndex as pattern_results_df
     final_labels = pd.Series('no_pattern', index=pattern_results_df.index)
 
-    # Apply idxmax only to rows that have at least one pattern
+    # Apply priority-based assignment: for each row with patterns, find the first True in priority order
     if has_pattern_mask.any():
+        # For rows with patterns, get the first True pattern in priority order
         first_true_label = bool_df.loc[has_pattern_mask].idxmax(axis=1)
         final_labels.loc[has_pattern_mask] = first_true_label
 
-    print("Label assignment complete.")
-    print("Final label distribution:")
-    print(final_labels.value_counts())
+    logger.info("Label assignment complete.")
+    logger.info("Final label distribution:")
+    label_counts = final_labels.value_counts()
+    for label, count in label_counts.items():
+        logger.info(f"  {label}: {count}")
 
-    # Return only the Series of labels, indexed by RangeIndex
     return final_labels
 
 if __name__ == "__main__":
