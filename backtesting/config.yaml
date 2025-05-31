@@ -3,8 +3,8 @@
 # Optional default date range for the entire process.
 # These can be overridden by command-line arguments --start-date and --end-date in run_backtest.py.
 # Format: YYYY-MM-DD
-start_date: '2023-10-01'
-end_date: '2025-04-01'
+start_date: '2024-01-02'
+end_date: '2024-12-31'
 
 # Configuration for pattern label generation (replaces predict_historical)
 label_generation:
@@ -15,25 +15,25 @@ label_generation:
   # 'no_pattern' is always longd.
   pattern_directions:
     bearish_engulfing: 'long'
-    bearish_harami: 'long'
-    dark_cloud_cover: 'long'
-    evening_star: 'long'
-    evening_star_doji: 'long'
+    bearish_harami: 'ignore'
+    dark_cloud_cover: 'ignore'
+    evening_star: 'ignore'
+    evening_star_doji: 'ignore'
     gravestone_doji: 'long'
-    hanging_man: 'long'    
+    hanging_man: 'ignore'    
     shooting_star: 'ignore'  
     # Bullish Patterns -> long
-    bullish_engulfing: 'long'
+    bullish_engulfing: 'ignore'
     bullish_harami: 'long'
     dragonfly_doji: 'long'  
-    hammer: 'long'          
-    inverted_hammer: 'long' 
-    morning_star: 'long'
+    hammer: 'ignore'          
+    inverted_hammer: 'ignore' 
+    morning_star: 'ignore'
     morning_star_doji: 'long'
-    piercing_pattern: 'long'
-    doji: 'long'
-    doji_star: 'long'
-    star: 'long'
+    piercing_pattern: 'ignore'
+    doji: 'ignore'
+    doji_star: 'ignore'
+    star: 'ignore'
     rain_drop: 'long'
     rain_drop_doji: 'long'
     breakout: 'ignore'     
